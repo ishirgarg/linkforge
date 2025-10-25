@@ -1,0 +1,803 @@
+"""
+Queue-Based Multi-Model Gemini Processor
+Processes multiple documents concurrently with chunk queues and immediate failover.
+"""
+
+import os
+import json
+import requests
+import time
+import random
+import threading
+import queue
+from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from enum import Enum
+
+# Load environment variables
+load_dotenv()
+
+class ModelStatus(Enum):
+    AVAILABLE = "available"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
+    BUSY = "busy"
+
+@dataclass
+class ChunkTask:
+    """Represents a chunk processing task."""
+    chunk_id: str
+    content: str
+    url: str
+    is_first: bool
+    is_last: bool
+    chunk_index: int
+    total_chunks: int
+    retry_count: int = 0
+    max_retries: int = 3
+
+@dataclass
+class ModelInfo:
+    """Information about a Gemini model."""
+    name: str
+    base_url: str
+    rpm: int
+    status: ModelStatus = ModelStatus.AVAILABLE
+    calls: List[float] = None
+    lock: threading.Lock = None
+    last_error: Optional[str] = None
+    error_count: int = 0
+    
+    def __post_init__(self):
+        if self.calls is None:
+            self.calls = []
+        if self.lock is None:
+            self.lock = threading.Lock()
+
+class QueueBasedProcessor:
+    def __init__(self, api_key: str = None):
+        """Initialize the queue-based processor with correct model names."""
+        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'X-goog-api-key': self.api_key
+        }
+        
+        # Correct model configurations (based on your actual rate limits)
+        self.models = {
+            'gemini-2.0-flash-lite': ModelInfo(
+                name='gemini-2.0-flash-lite',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent',
+                rpm=30
+            ),
+            'gemini-2.5-flash-lite': ModelInfo(
+                name='gemini-2.5-flash-lite',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent',
+                rpm=15
+            ),
+            'gemini-2.5-flash': ModelInfo(
+                name='gemini-2.5-flash',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+                rpm=10
+            ),
+            'gemini-2.0-flash-exp': ModelInfo(
+                name='gemini-2.0-flash-exp',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent',
+                rpm=10
+            ),
+            'gemini-2.0-flash': ModelInfo(
+                name='gemini-2.0-flash',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+                rpm=15
+            ),
+            'gemini-2.5-pro': ModelInfo(
+                name='gemini-2.5-pro',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent',
+                rpm=2
+            ),
+            'learnlm-2.0-flash-experimental': ModelInfo(
+                name='learnlm-2.0-flash-experimental',
+                base_url='https://generativelanguage.googleapis.com/v1beta/models/learnlm-2.0-flash-experimental:generateContent',
+                rpm=15
+            )
+        }
+        
+        # Queues for different priority levels
+        self.high_priority_queue = queue.Queue()  # For first chunks (need titles)
+        self.normal_priority_queue = queue.Queue()  # For middle chunks
+        self.low_priority_queue = queue.Queue()  # For last chunks
+        
+        # Results storage
+        self.results = {}
+        self.results_lock = threading.Lock()
+        
+        # Statistics
+        self.stats = {
+            'total_processed': 0,
+            'successful': 0,
+            'failed': 0,
+            'rate_limited': 0,
+            'model_switches': 0
+        }
+        self.stats_lock = threading.Lock()
+        
+        # Create output directory
+        self.output_dir = Path("documentation_markdown")
+        self.output_dir.mkdir(exist_ok=True)
+        
+        # Start worker threads
+        self.workers = []
+        self.shutdown_event = threading.Event()
+        
+        print("🚀 Queue-Based Multi-Model Processor initialized!")
+        print(f"📁 Output directory: {self.output_dir}")
+        print(f"⚡ Total theoretical throughput: {sum(m.rpm for m in self.models.values())} calls/minute")
+        print(f"🤖 Available models: {len(self.models)}")
+        for model_name, model_info in self.models.items():
+            print(f"  - {model_name}: {model_info.rpm} RPM")
+        
+        # Start worker threads
+        self._start_workers()
+    
+    def _start_workers(self):
+        """Start worker threads for each model."""
+        for model_name in self.models.keys():
+            # Use more workers for higher RPM models
+            rpm = self.models[model_name].rpm
+            worker_count = max(1, min(3, rpm // 5))  # 1-3 workers based on RPM
+            
+            for i in range(worker_count):
+                worker = threading.Thread(
+                    target=self._worker_loop,
+                    args=(model_name,),
+                    daemon=True
+                )
+                worker.start()
+                self.workers.append(worker)
+        
+        print(f"🔄 Started {len(self.workers)} worker threads")
+    
+    def _clean_old_calls(self, model_name: str):
+        """Remove API calls older than 1 minute."""
+        model = self.models[model_name]
+        with model.lock:
+            current_time = time.time()
+            model.calls = [call_time for call_time in model.calls if current_time - call_time < 60]
+    
+    def _is_model_available(self, model_name: str) -> bool:
+        """Check if a model is available for processing."""
+        model = self.models[model_name]
+        
+        if model.status == ModelStatus.ERROR:
+            # Check if we should retry after error
+            if time.time() - model.last_error > 300:  # 5 minutes
+                model.status = ModelStatus.AVAILABLE
+                model.error_count = 0
+                model.last_error = None
+            else:
+                return False
+        
+        if model.status == ModelStatus.RATE_LIMITED:
+            self._clean_old_calls(model_name)
+            with model.lock:
+                if len(model.calls) < model.rpm:
+                    model.status = ModelStatus.AVAILABLE
+                    return True
+            return False
+        
+        self._clean_old_calls(model_name)
+        with model.lock:
+            return len(model.calls) < model.rpm
+    
+    def _get_available_model(self, priority: str = "normal") -> Optional[str]:
+        """Get the best available model based on priority and availability."""
+        # Sort models by preference (higher RPM first, then by max_tokens)
+        sorted_models = sorted(
+            self.models.items(),
+            key=lambda x: (x[1].rpm, x[1].max_tokens),
+            reverse=True
+        )
+        
+        for model_name, model_info in sorted_models:
+            if self._is_model_available(model_name):
+                return model_name
+        
+        return None
+    
+    def _wait_for_availability(self, model_name: str, timeout: float = 30.0) -> bool:
+        """Wait for a model to become available."""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            if self._is_model_available(model_name):
+                return True
+            time.sleep(0.1)
+        
+        return False
+    
+    def _make_api_request(self, task: ChunkTask, model_name: str) -> Tuple[bool, str]:
+        """Make an API request to the specified model."""
+        model = self.models[model_name]
+        
+        # Wait for availability
+        if not self._wait_for_availability(model_name, timeout=10.0):
+            return False, f"Model {model_name} not available within timeout"
+        
+        # Create prompt based on chunk position
+        prompt = self._create_prompt(task)
+        
+        try:
+            # Make API request
+            response = requests.post(
+                model.base_url,
+                headers=self.headers,
+                json={
+                    "contents": [
+                        {
+                            "parts": [
+                                {
+                                    "text": prompt
+                                }
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "topP": 0.8,
+                        "topK": 10
+                    }
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Validate response
+                if 'candidates' not in result or len(result['candidates']) == 0:
+                    raise Exception(f"Invalid response: {result}")
+                
+                candidate = result['candidates'][0]
+                if 'content' not in candidate or 'parts' not in candidate['content'] or len(candidate['content']['parts']) == 0:
+                    raise Exception(f"Invalid candidate structure: {candidate}")
+                
+                if 'text' not in candidate['content']['parts'][0]:
+                    raise Exception(f"Missing text in response: {candidate['content']['parts'][0]}")
+                
+                markdown_content = candidate['content']['parts'][0]['text']
+                
+                # Record successful call
+                with model.lock:
+                    model.calls.append(time.time())
+                
+                # Update statistics
+                with self.stats_lock:
+                    self.stats['successful'] += 1
+                
+                return True, markdown_content
+                
+            elif response.status_code == 429:  # Rate limited
+                model.status = ModelStatus.RATE_LIMITED
+                with self.stats_lock:
+                    self.stats['rate_limited'] += 1
+                return False, f"Rate limited: {response.status_code}"
+                
+            else:
+                error_msg = f"API Error {response.status_code}: {response.text}"
+                model.status = ModelStatus.ERROR
+                model.last_error = time.time()
+                model.error_count += 1
+                return False, error_msg
+                
+        except requests.exceptions.Timeout:
+            error_msg = "Request timed out"
+            model.status = ModelStatus.ERROR
+            model.last_error = time.time()
+            model.error_count += 1
+            return False, error_msg
+            
+        except Exception as e:
+            error_msg = f"Request failed: {str(e)}"
+            model.status = ModelStatus.ERROR
+            model.last_error = time.time()
+            model.error_count += 1
+            return False, error_msg
+    
+    def _create_prompt(self, task: ChunkTask) -> str:
+        """Create a prompt for the given task."""
+        if task.is_first and task.is_last:
+            return f"""
+            Convert the following HTML content from a documentation page into clean, well-structured markdown.
+            
+            URL: {task.url}
+            
+            Requirements:
+            1. Extract the main content and structure
+            2. Convert headings, lists, code blocks, and links properly
+            3. Remove navigation elements, sidebars, and non-content elements
+            4. Create a clear hierarchy with proper markdown headings
+            5. Preserve code examples and technical details
+            6. Make it readable and well-formatted
+            7. Add a title at the top based on the page content
+            8. Include the original URL as a reference
+            
+            HTML Content:
+            {task.content}
+            """
+        elif task.is_first:
+            return f"""
+            Convert the following HTML content (first part of {task.total_chunks}) from a documentation page into clean, well-structured markdown.
+            
+            URL: {task.url}
+            
+            Requirements:
+            1. Extract the main content and structure
+            2. Convert headings, lists, code blocks, and links properly
+            3. Remove navigation elements, sidebars, and non-content elements
+            4. Create a clear hierarchy with proper markdown headings
+            5. Preserve code examples and technical details
+            6. Make it readable and well-formatted
+            7. Add a title at the top based on the page content
+            8. Include the original URL as a reference
+            9. This is the FIRST part - include the main title and introduction
+            
+            HTML Content:
+            {task.content}
+            """
+        elif task.is_last:
+            return f"""
+            Convert the following HTML content (last part of {task.total_chunks}) from a documentation page into clean, well-structured markdown.
+            
+            URL: {task.url}
+            
+            Requirements:
+            1. Extract the main content and structure
+            2. Convert headings, lists, code blocks, and links properly
+            3. Remove navigation elements, sidebars, and non-content elements
+            4. Create a clear hierarchy with proper markdown headings
+            5. Preserve code examples and technical details
+            6. Make it readable and well-formatted
+            7. This is the LAST part - include conclusion and final sections
+            8. Do NOT include a title (it should be in the first chunk)
+            
+            HTML Content:
+            {task.content}
+            """
+        else:
+            return f"""
+            Convert the following HTML content (part {task.chunk_index} of {task.total_chunks}) from a documentation page into clean, well-structured markdown.
+            
+            URL: {task.url}
+            
+            Requirements:
+            1. Extract the main content and structure
+            2. Convert headings, lists, code blocks, and links properly
+            3. Remove navigation elements, sidebars, and non-content elements
+            4. Create a clear hierarchy with proper markdown headings
+            5. Preserve code examples and technical details
+            6. Make it readable and well-formatted
+            7. This is a MIDDLE part - continue the content flow
+            8. Do NOT include a title (it should be in the first chunk)
+            
+            HTML Content:
+            {task.content}
+            """
+    
+    def _worker_loop(self, model_name: str):
+        """Worker loop for processing chunks."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Try to get a task from any queue (prioritize high priority)
+                task = None
+                for queue_obj in [self.high_priority_queue, self.normal_priority_queue, self.low_priority_queue]:
+                    try:
+                        task = queue_obj.get(timeout=1.0)
+                        break
+                    except queue.Empty:
+                        continue
+                
+                if task is None:
+                    continue
+                
+                # Process the task
+                success, result = self._make_api_request(task, model_name)
+                
+                if success:
+                    # Store successful result in document status
+                    with self.document_status_lock:
+                        if task.url in self.document_status:
+                            self.document_status[task.url]['chunks'][task.chunk_id] = result
+                            self.document_status[task.url]['completed_chunks'] += 1
+                            
+                            # Check if document is complete
+                            total_chunks = self.document_status[task.url]['total_chunks']
+                            completed = self.document_status[task.url]['completed_chunks']
+                            if completed >= total_chunks:
+                                self.document_status[task.url]['status'] = 'completed'
+                    
+                    print(f"✅ {model_name}: {task.chunk_id} completed")
+                    
+                else:
+                    # Handle failure - try with different model or retry
+                    if task.retry_count < task.max_retries:
+                        task.retry_count += 1
+                        print(f"⚠️ {model_name}: {task.chunk_id} failed, retrying ({task.retry_count}/{task.max_retries}): {result}")
+                        
+                        # Put back in queue for retry
+                        if task.is_first:
+                            self.high_priority_queue.put(task)
+                        elif task.is_last:
+                            self.low_priority_queue.put(task)
+                        else:
+                            self.normal_priority_queue.put(task)
+                    else:
+                        # Max retries exceeded - store error result in document status
+                        error_result = f"# Error Processing Chunk {task.chunk_index}\n\nFailed after {task.max_retries} attempts.\n\nError: {result}"
+                        with self.document_status_lock:
+                            if task.url in self.document_status:
+                                self.document_status[task.url]['chunks'][task.chunk_id] = error_result
+                                self.document_status[task.url]['completed_chunks'] += 1
+                                
+                                # Check if document is complete
+                                total_chunks = self.document_status[task.url]['total_chunks']
+                                completed = self.document_status[task.url]['completed_chunks']
+                                if completed >= total_chunks:
+                                    self.document_status[task.url]['status'] = 'completed'
+                        
+                        print(f"❌ {model_name}: {task.chunk_id} failed permanently: {result}")
+                        
+                        with self.stats_lock:
+                            self.stats['failed'] += 1
+                
+                # Mark task as done
+                for queue_obj in [self.high_priority_queue, self.normal_priority_queue, self.low_priority_queue]:
+                    try:
+                        queue_obj.task_done()
+                        break
+                    except ValueError:
+                        continue
+                
+            except Exception as e:
+                print(f"❌ Worker {model_name} error: {str(e)}")
+                time.sleep(1)
+    
+    def chunk_html_content(self, html_content: str, max_chunk_size: int = 8000) -> List[str]:
+        """Chunk HTML content for processing."""
+        if len(html_content) <= max_chunk_size:
+            return [html_content]
+        
+        import re
+        
+        # Detect if this is HTML or markdown-like content
+        is_html = bool(re.search(r'<[^>]+>', html_content))
+        
+        if is_html:
+            heading_pattern = r'(<h[1-3][^>]*>.*?</h[1-3]>)'
+            parts = re.split(heading_pattern, html_content, flags=re.IGNORECASE | re.DOTALL)
+        else:
+            heading_pattern = r'(^#{1,3}\s+.*$)'
+            parts = re.split(heading_pattern, html_content, flags=re.MULTILINE)
+        
+        chunks = []
+        current_chunk = ""
+        
+        for part in parts:
+            if len(current_chunk + part) <= max_chunk_size:
+                current_chunk += part
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = part
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        # Further split large chunks
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) <= max_chunk_size:
+                final_chunks.append(chunk)
+            else:
+                # Split by paragraphs
+                para_pattern = r'(\n\s*\n)'
+                parts = re.split(para_pattern, chunk)
+                
+                sub_chunks = []
+                current = ""
+                for part in parts:
+                    if len(current + part) <= max_chunk_size:
+                        current += part
+                    else:
+                        if current:
+                            sub_chunks.append(current.strip())
+                        current = part
+                if current:
+                    sub_chunks.append(current.strip())
+                
+                final_chunks.extend(sub_chunks)
+        
+        return final_chunks
+    
+    
+    def _combine_chunks(self, processed_chunks: List[str], url: str) -> str:
+        """Combine processed chunks into a single markdown document."""
+        print(f"🔗 Combining {len(processed_chunks)} chunks...")
+        
+        # Filter out error chunks
+        valid_chunks = []
+        error_chunks = []
+        
+        for i, chunk in enumerate(processed_chunks):
+            if chunk.startswith('# Error Processing Chunk'):
+                error_chunks.append(i + 1)
+            else:
+                valid_chunks.append((i, chunk))
+        
+        if error_chunks:
+            print(f"⚠️ Warning: {len(error_chunks)} chunks failed: {error_chunks}")
+        
+        if not valid_chunks:
+            return f"# Error Processing Page\n\nAll chunks failed to process for: {url}"
+        
+        # Start with first valid chunk
+        combined = valid_chunks[0][1]
+        
+        # Add subsequent chunks, removing duplicate titles
+        for i, chunk in valid_chunks[1:]:
+            lines = chunk.split('\n')
+            filtered_lines = []
+            skip_title = True
+            
+            for line in lines:
+                if skip_title and (line.startswith('# ') or line.startswith('**Original URL:**')):
+                    continue
+                elif line.startswith('---') and skip_title:
+                    skip_title = False
+                    continue
+                else:
+                    skip_title = False
+                    filtered_lines.append(line)
+            
+            if filtered_lines:
+                combined += '\n\n' + '\n'.join(filtered_lines)
+        
+        if error_chunks:
+            combined += f"\n\n---\n\n**Note:** Some sections failed to process (chunks {', '.join(map(str, error_chunks))})."
+        
+        print(f"✅ Successfully combined {len(valid_chunks)} valid chunks")
+        return combined
+    
+    def process_multiple_documents(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process multiple documents concurrently by adding all chunks to queues."""
+        print(f"🚀 Processing {len(documents)} documents concurrently...")
+        
+        # Clear previous results
+        with self.results_lock:
+            self.results.clear()
+        
+        # Reset statistics
+        with self.stats_lock:
+            self.stats = {
+                'total_processed': 0,
+                'successful': 0,
+                'failed': 0,
+                'rate_limited': 0,
+                'model_switches': 0
+            }
+        
+        # Document tracking
+        self.document_status = {}
+        self.document_status_lock = threading.Lock()
+        
+        # Add all documents to processing queues
+        total_chunks = 0
+        for i, doc in enumerate(documents, 1):
+            url = doc['url']
+            
+            if doc['status'] == 'success' and doc.get('raw_result'):
+                html_content = str(doc['raw_result'])
+                chunks = self.chunk_html_content(html_content, max_chunk_size=8000)
+                
+                print(f"📄 Document {i}: {url} - {len(chunks)} chunks")
+                
+                # Track document status
+                with self.document_status_lock:
+                    self.document_status[url] = {
+                        'index': i,
+                        'total_chunks': len(chunks),
+                        'completed_chunks': 0,
+                        'chunks': {},
+                        'status': 'processing'
+                    }
+                
+                # Add all chunks to appropriate queues
+                for j, chunk in enumerate(chunks):
+                    task = ChunkTask(
+                        chunk_id=f"{url}_chunk_{j+1}",
+                        content=chunk,
+                        url=url,
+                        is_first=(j == 0),
+                        is_last=(j == len(chunks) - 1),
+                        chunk_index=j + 1,
+                        total_chunks=len(chunks)
+                    )
+                    
+                    # Add to appropriate queue based on priority
+                    if j == 0:  # First chunk
+                        self.high_priority_queue.put(task)
+                    elif j == len(chunks) - 1:  # Last chunk
+                        self.low_priority_queue.put(task)
+                    else:  # Middle chunks
+                        self.normal_priority_queue.put(task)
+                    
+                    total_chunks += 1
+            else:
+                print(f"⚠️ Skipping document {i}: {url} - no content or error")
+                with self.document_status_lock:
+                    self.document_status[url] = {
+                        'index': i,
+                        'total_chunks': 0,
+                        'completed_chunks': 0,
+                        'chunks': {},
+                        'status': 'skipped'
+                    }
+        
+        print(f"📊 Total chunks queued: {total_chunks}")
+        print(f"⏳ Waiting for all chunks to be processed...")
+        
+        # Wait for all chunks to be processed
+        self.high_priority_queue.join()
+        self.normal_priority_queue.join()
+        self.low_priority_queue.join()
+        
+        print("✅ All chunks processed, combining results...")
+        
+        # Combine results for each document
+        processed_documents = []
+        for doc in documents:
+            url = doc['url']
+            
+            with self.document_status_lock:
+                doc_status = self.document_status.get(url, {})
+            
+            if doc_status.get('status') == 'skipped':
+                doc['markdown_content'] = f"# Error\n\nCould not process: {url}"
+                doc['markdown_file'] = None
+                doc['processed_at'] = time.time()
+            else:
+                # Combine chunks for this document
+                chunk_results = []
+                for i in range(doc_status['total_chunks']):
+                    chunk_id = f"{url}_chunk_{i+1}"
+                    if chunk_id in doc_status['chunks']:
+                        chunk_results.append(doc_status['chunks'][chunk_id])
+                    else:
+                        chunk_results.append(f"# Error Processing Chunk {i+1}\n\nChunk not processed.")
+                
+                # Combine all chunks
+                markdown_content = self._combine_chunks(chunk_results, url)
+                
+                # Save markdown file
+                filename = self._save_markdown(markdown_content, url, doc_status['index'])
+                
+                doc['markdown_content'] = markdown_content
+                doc['markdown_file'] = filename
+                doc['processed_at'] = time.time()
+                
+                print(f"✅ Document {doc_status['index']} completed: {url}")
+            
+            processed_documents.append(doc)
+            
+            with self.stats_lock:
+                self.stats['total_processed'] += 1
+        
+        # Print final statistics
+        self._print_statistics()
+        
+        return processed_documents
+    
+    def _save_markdown(self, markdown_content: str, url: str, index: int) -> str:
+        """Save markdown content to a file."""
+        url_parts = url.replace('https://', '').replace('http://', '').split('/')
+        path_parts = url_parts[1:] if len(url_parts) > 1 else []
+        
+        clean_parts = []
+        for part in path_parts:
+            clean_part = part.replace('.html', '').replace('.htm', '')
+            if clean_part and clean_part != 'index':
+                clean_parts.append(clean_part)
+        
+        if clean_parts:
+            filename = f"{index:03d}_{'_'.join(clean_parts)}.md"
+        else:
+            filename = f"{index:03d}_homepage.md"
+        
+        filename = "".join(c for c in filename if c.isalnum() or c in "._-")
+        filepath = self.output_dir / filename
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+        
+        print(f"💾 Saved: {filepath}")
+        return str(filepath)
+    
+    def _print_statistics(self):
+        """Print processing statistics."""
+        with self.stats_lock:
+            print(f"\n📊 Processing Statistics:")
+            print(f"  - Total processed: {self.stats['total_processed']}")
+            print(f"  - Successful: {self.stats['successful']}")
+            print(f"  - Failed: {self.stats['failed']}")
+            print(f"  - Rate limited: {self.stats['rate_limited']}")
+            print(f"  - Model switches: {self.stats['model_switches']}")
+        
+        print(f"\n🤖 Model Status:")
+        for model_name, model_info in self.models.items():
+            with model_info.lock:
+                remaining = model_info.rpm - len(model_info.calls)
+                print(f"  - {model_name}: {model_info.status.value}, {len(model_info.calls)}/{model_info.rpm} used, {remaining} remaining")
+    
+    def shutdown(self):
+        """Shutdown the processor and stop all workers."""
+        print("🛑 Shutting down processor...")
+        self.shutdown_event.set()
+        
+        # Wait for workers to finish
+        for worker in self.workers:
+            worker.join(timeout=5.0)
+        
+        print("✅ Processor shutdown complete")
+
+
+def main():
+    """Example usage of the queue-based processor."""
+    print("🚀 Queue-Based Multi-Model Gemini Processor")
+    print("=" * 60)
+    
+    # Initialize processor
+    processor = QueueBasedProcessor()
+    
+    try:
+        # Load scraped data
+        import glob
+        result_files = glob.glob("manual_crawl_results_*.json")
+        if not result_files:
+            print("❌ No scraped data found. Please run manual_url_crawler.py first.")
+            return
+        
+        latest_file = max(result_files, key=os.path.getctime)
+        print(f"📂 Loading scraped data from: {latest_file}")
+        
+        with open(latest_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        scraped_data = data.get('scraped_data', [])
+        if not scraped_data:
+            print("❌ No scraped data found in the file.")
+            return
+        
+        print(f"📊 Found {len(scraped_data)} pages to process")
+        
+        # Process all pages
+        processed_data = processor.process_multiple_documents(scraped_data)
+        
+        # Save results
+        timestamp = int(time.time())
+        results_file = f"queue_processed_results_{timestamp}.json"
+        
+        with open(results_file, 'w', encoding='utf-8') as f:
+            json.dump(processed_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n✅ Queue-based processing completed!")
+        print(f"📁 Markdown files saved to: {processor.output_dir}")
+        print(f"💾 Full results saved to: {results_file}")
+        
+    finally:
+        processor.shutdown()
+
+
+if __name__ == "__main__":
+    main()
