@@ -10,6 +10,7 @@ import time
 import os
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -244,13 +245,14 @@ def scrape_single_url(url: str) -> Dict[str, Any]:
             "timestamp": time.time()
         }
 
-def crawl_manual_urls(documentation_url: str, max_urls: int = 50) -> List[Dict[str, Any]]:
+def crawl_manual_urls(documentation_url: str, max_urls: int = 50, max_workers: int = 5) -> List[Dict[str, Any]]:
     """
-    Extract URLs from documentation page and scrape each one.
+    Extract URLs from documentation page and scrape each one concurrently.
     
     Args:
         documentation_url: The documentation page to extract URLs from
         max_urls: Maximum number of URLs to scrape
+        max_workers: Maximum number of concurrent workers (default: 5)
         
     Returns:
         List of scraped data for each URL
@@ -280,20 +282,45 @@ def crawl_manual_urls(documentation_url: str, max_urls: int = 50) -> List[Dict[s
     for i, url in enumerate(urls_to_scrape, 1):
         print(f"  {i}. {url}")
     
-    print(f"\n🚀 Starting to scrape {len(urls_to_scrape)} URLs...")
+    print(f"\n🚀 Starting concurrent scraping of {len(urls_to_scrape)} URLs...")
     
-    # Step 2: Scrape each URL individually
+    # Step 2: Scrape URLs concurrently
     scraped_data = []
+    print(f"🔧 Using {max_workers} concurrent workers")
     
-    for i, url in enumerate(urls_to_scrape, 1):
-        print(f"\n--- Scraping {i}/{len(urls_to_scrape)} ---")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all scraping tasks
+        future_to_url = {
+            executor.submit(scrape_single_url, url): url 
+            for url in urls_to_scrape
+        }
         
-        # Scrape the URL
-        result = scrape_single_url(url)
-        scraped_data.append(result)
-        
-        # Add delay between requests
-        time.sleep(1)
+        # Process completed tasks
+        completed_count = 0
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            completed_count += 1
+            
+            try:
+                result = future.result()
+                scraped_data.append(result)
+                
+                status_icon = "✅" if result["status"] == "success" else "❌"
+                print(f"{status_icon} [{completed_count}/{len(urls_to_scrape)}] {url}")
+                
+            except Exception as e:
+                print(f"❌ [{completed_count}/{len(urls_to_scrape)}] {url} - Exception: {str(e)}")
+                scraped_data.append({
+                    "url": url,
+                    "content": "",
+                    "raw_result": None,
+                    "status": "error",
+                    "error": f"Future exception: {str(e)}",
+                    "timestamp": time.time()
+                })
+            
+            # Small delay to avoid overwhelming the API
+            time.sleep(0.5)
     
     # Step 3: Save results
     timestamp = int(time.time())
@@ -331,14 +358,15 @@ def main():
     print("=" * 50)
     
     # Example: Extract URLs from Bright Data documentation
-    documentation_url = "https://openai.github.io/openai-agents-python/"
+    documentation_url = "https://docs.streamlit.io/develop/api-reference"
     
     # Or use any other documentation page
     # documentation_url = "https://your-documentation-site.com"
     
     results = crawl_manual_urls(
         documentation_url=documentation_url,
-        max_urls=200  # Adjust as needed
+        max_urls=200,  # Adjust as needed
+        max_workers=200  # Concurrent workers (adjust based on API limits)
     )
     
     print(f"\n🎉 Manual crawling complete!")
