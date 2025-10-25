@@ -1,6 +1,20 @@
 """
 Queue-Based Multi-Model Gemini Processor
 Processes multiple documents concurrently with chunk queues and immediate failover.
+
+THREADING MODEL:
+- Multiple worker threads (1-3 per model based on RPM)
+- Three priority queues: high (first chunks), normal (middle), low (last chunks)
+- Per-model locks for rate limiting (model.lock)
+- Global lock for document status (document_status_lock)
+- Global lock for statistics (stats_lock)
+
+RACE CONDITION PREVENTION:
+1. Atomic Rate Limit Reservation: Reserve API slot BEFORE making request
+2. Minimal Lock Holding: Release locks before expensive I/O operations
+3. Source Queue Tracking: Track which queue task came from for task_done()
+4. Status Check Before Write: Prevent multiple threads from writing same document
+5. Slot Cleanup on Failure: Remove reserved slot if API call fails
 """
 
 import os
@@ -37,7 +51,7 @@ class ChunkTask:
     chunk_index: int
     total_chunks: int
     retry_count: int = 0
-    max_retries: int = 3
+    max_retries: int = 10  # Maximum retries before giving up
 
 @dataclass
 class ModelInfo:
@@ -58,13 +72,35 @@ class ModelInfo:
             self.lock = threading.Lock()
 
 class QueueBasedProcessor:
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, max_retries: int = 10):
         """Initialize the queue-based processor with correct model names."""
-        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
-        self.headers = {
-            'Content-Type': 'application/json',
-            'X-goog-api-key': self.api_key
-        }
+        # Load all available API keys
+        self.api_keys = []
+        if api_key:
+            self.api_keys.append(api_key)
+        else:
+            # Load primary key
+            primary_key = os.getenv('GEMINI_API_KEY')
+            if primary_key:
+                self.api_keys.append(primary_key)
+            
+            # Load additional keys (GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.)
+            i = 1
+            while True:
+                additional_key = os.getenv(f'GEMINI_API_KEY_{i}')
+                if additional_key:
+                    self.api_keys.append(additional_key)
+                    i += 1
+                else:
+                    break
+        
+        if not self.api_keys:
+            raise ValueError("No GEMINI_API_KEY found in environment variables")
+        
+        print(f"🔑 Loaded {len(self.api_keys)} API key(s)")
+        
+        self.max_retries = max_retries
+        self.api_key_lock = threading.Lock()  # Lock for thread-safe random selection
         
         # Correct model configurations (based on your actual rate limits)
         self.models = {
@@ -160,44 +196,54 @@ class QueueBasedProcessor:
         
         print(f"🔄 Started {len(self.workers)} worker threads")
     
+    def _get_random_api_key(self) -> str:
+        """Get a random API key for load balancing across keys."""
+        with self.api_key_lock:
+            return random.choice(self.api_keys)
+    
     def _clean_old_calls(self, model_name: str):
-        """Remove API calls older than 1 minute."""
+        """Remove API calls older than 1 minute. Should be called while holding model.lock."""
         model = self.models[model_name]
-        with model.lock:
-            current_time = time.time()
-            model.calls = [call_time for call_time in model.calls if current_time - call_time < 60]
+        # Note: This method assumes the caller already holds model.lock
+        # to avoid double-locking and reduce contention
+        current_time = time.time()
+        model.calls = [call_time for call_time in model.calls if current_time - call_time < 60]
     
     def _is_model_available(self, model_name: str) -> bool:
         """Check if a model is available for processing."""
         model = self.models[model_name]
         
-        if model.status == ModelStatus.ERROR:
-            # Check if we should retry after error
-            if time.time() - model.last_error > 300:  # 5 minutes
-                model.status = ModelStatus.AVAILABLE
-                model.error_count = 0
-                model.last_error = None
-            else:
-                return False
-        
-        if model.status == ModelStatus.RATE_LIMITED:
-            self._clean_old_calls(model_name)
-            with model.lock:
-                if len(model.calls) < model.rpm:
-                    model.status = ModelStatus.AVAILABLE
-                    return True
-            return False
-        
-        self._clean_old_calls(model_name)
         with model.lock:
-            return len(model.calls) < model.rpm
+            # Clean old calls first (while holding lock)
+            self._clean_old_calls(model_name)
+            
+            if model.status == ModelStatus.ERROR:
+                # Check if we should retry after error
+                if time.time() - model.last_error > 300:  # 5 minutes
+                    model.status = ModelStatus.AVAILABLE
+                    model.error_count = 0
+                    model.last_error = None
+                else:
+                    return False
+            
+            # Check current rate limit status
+            current_calls = len(model.calls)
+            
+            if current_calls >= model.rpm:
+                # Model is rate limited
+                model.status = ModelStatus.RATE_LIMITED
+                return False
+            else:
+                # Model is available
+                model.status = ModelStatus.AVAILABLE
+                return True
     
     def _get_available_model(self, priority: str = "normal") -> Optional[str]:
         """Get the best available model based on priority and availability."""
-        # Sort models by preference (higher RPM first, then by max_tokens)
+        # Sort models by preference (higher RPM first)
         sorted_models = sorted(
             self.models.items(),
-            key=lambda x: (x[1].rpm, x[1].max_tokens),
+            key=lambda x: x[1].rpm,
             reverse=True
         )
         
@@ -222,18 +268,32 @@ class QueueBasedProcessor:
         """Make an API request to the specified model."""
         model = self.models[model_name]
         
-        # Wait for availability
-        if not self._wait_for_availability(model_name, timeout=10.0):
-            return False, f"Model {model_name} not available within timeout"
+        # Atomically reserve a slot in the rate limit (prevents race conditions)
+        with model.lock:
+            self._clean_old_calls(model_name)
+            
+            if len(model.calls) >= model.rpm:
+                model.status = ModelStatus.RATE_LIMITED
+                return False, f"Model {model_name} rate limited"
+            
+            # Reserve the slot BEFORE making the request
+            model.calls.append(time.time())
         
         # Create prompt based on chunk position
         prompt = self._create_prompt(task)
+        
+        # Get a random API key for this request (load balancing)
+        api_key = self._get_random_api_key()
+        headers = {
+            'Content-Type': 'application/json',
+            'X-goog-api-key': api_key
+        }
         
         try:
             # Make API request
             response = requests.post(
                 model.base_url,
-                headers=self.headers,
+                headers=headers,
                 json={
                     "contents": [
                         {
@@ -269,9 +329,12 @@ class QueueBasedProcessor:
                 
                 markdown_content = candidate['content']['parts'][0]['text']
                 
-                # Record successful call
+                # Update status (slot already reserved)
                 with model.lock:
-                    model.calls.append(time.time())
+                    if len(model.calls) >= model.rpm:
+                        model.status = ModelStatus.RATE_LIMITED
+                    else:
+                        model.status = ModelStatus.AVAILABLE
                 
                 # Update statistics
                 with self.stats_lock:
@@ -280,12 +343,20 @@ class QueueBasedProcessor:
                 return True, markdown_content
                 
             elif response.status_code == 429:  # Rate limited
-                model.status = ModelStatus.RATE_LIMITED
+                # Remove the reserved slot since we didn't actually use it
+                with model.lock:
+                    if model.calls:
+                        model.calls.pop()
+                    model.status = ModelStatus.RATE_LIMITED
                 with self.stats_lock:
                     self.stats['rate_limited'] += 1
                 return False, f"Rate limited: {response.status_code}"
                 
             else:
+                # Remove the reserved slot on error
+                with model.lock:
+                    if model.calls:
+                        model.calls.pop()
                 error_msg = f"API Error {response.status_code}: {response.text}"
                 model.status = ModelStatus.ERROR
                 model.last_error = time.time()
@@ -293,6 +364,10 @@ class QueueBasedProcessor:
                 return False, error_msg
                 
         except requests.exceptions.Timeout:
+            # Remove the reserved slot on timeout
+            with model.lock:
+                if model.calls:
+                    model.calls.pop()
             error_msg = "Request timed out"
             model.status = ModelStatus.ERROR
             model.last_error = time.time()
@@ -300,6 +375,10 @@ class QueueBasedProcessor:
             return False, error_msg
             
         except Exception as e:
+            # Remove the reserved slot on exception
+            with model.lock:
+                if model.calls:
+                    model.calls.pop()
             error_msg = f"Request failed: {str(e)}"
             model.status = ModelStatus.ERROR
             model.last_error = time.time()
@@ -392,9 +471,11 @@ class QueueBasedProcessor:
             try:
                 # Try to get a task from any queue (prioritize high priority)
                 task = None
+                source_queue = None
                 for queue_obj in [self.high_priority_queue, self.normal_priority_queue, self.low_priority_queue]:
                     try:
                         task = queue_obj.get(timeout=1.0)
+                        source_queue = queue_obj
                         break
                     except queue.Empty:
                         continue
@@ -402,11 +483,21 @@ class QueueBasedProcessor:
                 if task is None:
                     continue
                 
+                # Print queue status when picking up a task
+                try:
+                    total_queued = self.high_priority_queue.qsize() + self.normal_priority_queue.qsize() + self.low_priority_queue.qsize()
+                    print(f"📋 {model_name}: Processing {task.chunk_id} (Queue: {total_queued} remaining)")
+                except:
+                    pass
+                
                 # Process the task
                 success, result = self._make_api_request(task, model_name)
                 
                 if success:
                     # Store successful result in document status
+                    should_write = False
+                    doc_url = None
+                    
                     with self.document_status_lock:
                         if task.url in self.document_status:
                             self.document_status[task.url]['chunks'][task.chunk_id] = result
@@ -415,50 +506,116 @@ class QueueBasedProcessor:
                             # Check if document is complete
                             total_chunks = self.document_status[task.url]['total_chunks']
                             completed = self.document_status[task.url]['completed_chunks']
-                            if completed >= total_chunks:
+                            if completed >= total_chunks and self.document_status[task.url]['status'] != 'completed':
                                 self.document_status[task.url]['status'] = 'completed'
+                                should_write = True
+                                doc_url = task.url
+                    
+                    # Write file OUTSIDE the lock to avoid blocking other workers
+                    if should_write:
+                        self._write_completed_document(doc_url)
                     
                     print(f"✅ {model_name}: {task.chunk_id} completed")
                     
                 else:
-                    # Handle failure - try with different model or retry
-                    if task.retry_count < task.max_retries:
-                        task.retry_count += 1
-                        print(f"⚠️ {model_name}: {task.chunk_id} failed, retrying ({task.retry_count}/{task.max_retries}): {result}")
-                        
-                        # Put back in queue for retry
-                        if task.is_first:
-                            self.high_priority_queue.put(task)
-                        elif task.is_last:
-                            self.low_priority_queue.put(task)
-                        else:
-                            self.normal_priority_queue.put(task)
-                    else:
-                        # Max retries exceeded - store error result in document status
-                        error_result = f"# Error Processing Chunk {task.chunk_index}\n\nFailed after {task.max_retries} attempts.\n\nError: {result}"
-                        with self.document_status_lock:
-                            if task.url in self.document_status:
-                                self.document_status[task.url]['chunks'][task.chunk_id] = error_result
-                                self.document_status[task.url]['completed_chunks'] += 1
+                    # Handle failure - immediately try with different model
+                    print(f"⚠️ {model_name}: {task.chunk_id} failed, switching to another model: {result}")
+                    
+                    # Try with next available model immediately
+                    success_with_other = False
+                    available_models = [name for name in self.models.keys() 
+                                      if name != model_name and self._is_model_available(name)]
+                    
+                    if available_models:
+                        for other_model_name in available_models:
+                            print(f"🔄 Switching to {other_model_name} for {task.chunk_id}")
+                            success, result = self._make_api_request(task, other_model_name)
+                            if success:
+                                # Store successful result in document status
+                                should_write = False
+                                doc_url = None
                                 
-                                # Check if document is complete
-                                total_chunks = self.document_status[task.url]['total_chunks']
-                                completed = self.document_status[task.url]['completed_chunks']
-                                if completed >= total_chunks:
-                                    self.document_status[task.url]['status'] = 'completed'
+                                with self.document_status_lock:
+                                    if task.url in self.document_status:
+                                        self.document_status[task.url]['chunks'][task.chunk_id] = result
+                                        self.document_status[task.url]['completed_chunks'] += 1
+                                        
+                                        # Check if document is complete
+                                        total_chunks = self.document_status[task.url]['total_chunks']
+                                        completed = self.document_status[task.url]['completed_chunks']
+                                        if completed >= total_chunks and self.document_status[task.url]['status'] != 'completed':
+                                            self.document_status[task.url]['status'] = 'completed'
+                                            should_write = True
+                                            doc_url = task.url
+                                
+                                # Write file OUTSIDE the lock
+                                if should_write:
+                                    self._write_completed_document(doc_url)
+                                
+                                print(f"✅ {other_model_name}: {task.chunk_id} completed")
+                                success_with_other = True
+                                
+                                # Track model switch
+                                with self.stats_lock:
+                                    self.stats['model_switches'] += 1
+                                break
+                    else:
+                        print(f"⚠️ No available models for {task.chunk_id} - all models are rate limited or in error")
+                    
+                    if not success_with_other:
+                        # All models failed - check if we should retry or give up
+                        task.retry_count += 1
                         
-                        print(f"❌ {model_name}: {task.chunk_id} failed permanently: {result}")
+                        if task.retry_count < task.max_retries:
+                            # Put back in queue for retry
+                            print(f"⚠️ All models failed for {task.chunk_id}, retry {task.retry_count}/{task.max_retries}, putting back in queue: {result}")
+                            
+                            # Track retry
+                            with self.stats_lock:
+                                self.stats['retries'] += 1
+                            
+                            # Mark current task as done BEFORE re-queuing
+                            if source_queue is not None:
+                                source_queue.task_done()
+                            
+                            # Add exponential backoff delay before retrying (non-blocking)
+                            delay = min(5, 2 ** task.retry_count)  # Max 5 seconds delay
+                            time.sleep(delay)
+                            
+                            # Put back in appropriate queue for retry (this adds a new task)
+                            if task.is_first:
+                                self.high_priority_queue.put(task)
+                            elif task.is_last:
+                                self.low_priority_queue.put(task)
+                            else:
+                                self.normal_priority_queue.put(task)
+                            
+                            # Continue without calling task_done() again (already called above)
+                            continue
+                        else:
+                            # Max retries exceeded - store error result
+                            error_result = f"# Error Processing Chunk {task.chunk_index}\n\nFailed after {task.max_retries} retries.\n\nError: {result}"
+                            with self.document_status_lock:
+                                if task.url in self.document_status:
+                                    self.document_status[task.url]['chunks'][task.chunk_id] = error_result
+                                    self.document_status[task.url]['completed_chunks'] += 1
+                                    
+                                    # Check if document is complete
+                                    total_chunks = self.document_status[task.url]['total_chunks']
+                                    completed = self.document_status[task.url]['completed_chunks']
+                                    if completed >= total_chunks:
+                                        self.document_status[task.url]['status'] = 'completed'
+                                        # Write file immediately when document is complete
+                                        self._write_completed_document(task.url)
+                            
+                            print(f"❌ Max retries exceeded for {task.chunk_id}, giving up: {result}")
                         
                         with self.stats_lock:
                             self.stats['failed'] += 1
                 
-                # Mark task as done
-                for queue_obj in [self.high_priority_queue, self.normal_priority_queue, self.low_priority_queue]:
-                    try:
-                        queue_obj.task_done()
-                        break
-                    except ValueError:
-                        continue
+                # Mark task as done in the source queue
+                if source_queue is not None:
+                    source_queue.task_done()
                 
             except Exception as e:
                 print(f"❌ Worker {model_name} error: {str(e)}")
@@ -585,7 +742,8 @@ class QueueBasedProcessor:
                 'successful': 0,
                 'failed': 0,
                 'rate_limited': 0,
-                'model_switches': 0
+                'model_switches': 0,
+                'retries': 0
             }
         
         # Document tracking
@@ -622,7 +780,8 @@ class QueueBasedProcessor:
                         is_first=(j == 0),
                         is_last=(j == len(chunks) - 1),
                         chunk_index=j + 1,
-                        total_chunks=len(chunks)
+                        total_chunks=len(chunks),
+                        max_retries=self.max_retries
                     )
                     
                     # Add to appropriate queue based on priority
@@ -668,26 +827,19 @@ class QueueBasedProcessor:
                 doc['markdown_file'] = None
                 doc['processed_at'] = time.time()
             else:
-                # Combine chunks for this document
-                chunk_results = []
-                for i in range(doc_status['total_chunks']):
-                    chunk_id = f"{url}_chunk_{i+1}"
-                    if chunk_id in doc_status['chunks']:
-                        chunk_results.append(doc_status['chunks'][chunk_id])
-                    else:
-                        chunk_results.append(f"# Error Processing Chunk {i+1}\n\nChunk not processed.")
-                
-                # Combine all chunks
-                markdown_content = self._combine_chunks(chunk_results, url)
-                
-                # Save markdown file
-                filename = self._save_markdown(markdown_content, url, doc_status['index'])
-                
-                doc['markdown_content'] = markdown_content
-                doc['markdown_file'] = filename
-                doc['processed_at'] = time.time()
-                
-                print(f"✅ Document {doc_status['index']} completed: {url}")
+                # Document was processed - get the already-written file info
+                if doc_status.get('status') == 'completed' and 'markdown_file' in doc_status:
+                    # File was already written during processing
+                    doc['markdown_content'] = doc_status.get('markdown_content', '')
+                    doc['markdown_file'] = doc_status.get('markdown_file')
+                    doc['processed_at'] = doc_status.get('written_at', time.time())
+                    print(f"✅ Document {doc_status['index']} completed: {url} (already written)")
+                else:
+                    # Document wasn't completed or file wasn't written - create error
+                    doc['markdown_content'] = f"# Error\n\nDocument processing incomplete: {url}"
+                    doc['markdown_file'] = None
+                    doc['processed_at'] = time.time()
+                    print(f"⚠️ Document {doc_status['index']} incomplete: {url}")
             
             processed_documents.append(doc)
             
@@ -699,6 +851,43 @@ class QueueBasedProcessor:
         
         return processed_documents
     
+    def _write_completed_document(self, url: str):
+        """Write a completed document to markdown file immediately."""
+        # Get document data while holding lock (minimal time)
+        with self.document_status_lock:
+            doc_status = self.document_status.get(url, {})
+            if doc_status.get('status') != 'completed':
+                return
+            
+            # Copy data we need (fast operation)
+            total_chunks = doc_status['total_chunks']
+            chunks_dict = doc_status['chunks'].copy()
+            doc_index = doc_status['index']
+        
+        # Do expensive operations OUTSIDE the lock
+        chunk_results = []
+        for i in range(total_chunks):
+            chunk_id = f"{url}_chunk_{i+1}"
+            if chunk_id in chunks_dict:
+                chunk_results.append(chunks_dict[chunk_id])
+            else:
+                chunk_results.append(f"# Error Processing Chunk {i+1}\n\nChunk not processed.")
+        
+        # Combine all chunks (expensive)
+        markdown_content = self._combine_chunks(chunk_results, url)
+        
+        # Save markdown file (I/O operation)
+        filename = self._save_markdown(markdown_content, url, doc_index)
+        
+        # Update document status with file info (quick lock)
+        with self.document_status_lock:
+            if url in self.document_status:
+                self.document_status[url]['markdown_file'] = filename
+                self.document_status[url]['markdown_content'] = markdown_content
+                self.document_status[url]['written_at'] = time.time()
+        
+        print(f"💾 Document {doc_index} written: {filename}")
+
     def _save_markdown(self, markdown_content: str, url: str, index: int) -> str:
         """Save markdown content to a file."""
         url_parts = url.replace('https://', '').replace('http://', '').split('/')
@@ -724,6 +913,36 @@ class QueueBasedProcessor:
         print(f"💾 Saved: {filepath}")
         return str(filepath)
     
+    def get_model_status(self) -> dict:
+        """Get current status of all models."""
+        status = {}
+        for model_name, model_info in self.models.items():
+            with model_info.lock:
+                current_time = time.time()
+                # Clean old calls
+                if model_info.calls:
+                    model_info.calls = [call_time for call_time in model_info.calls if current_time - call_time < 60]
+                
+                calls_made = len(model_info.calls) if model_info.calls else 0
+                remaining = max(0, model_info.rpm - calls_made)
+                
+                # Update status based on current calls
+                if calls_made >= model_info.rpm:
+                    model_info.status = ModelStatus.RATE_LIMITED
+                else:
+                    model_info.status = ModelStatus.AVAILABLE
+                
+                status[model_name] = {
+                    'status': model_info.status.value,
+                    'calls_made': calls_made,
+                    'rpm_limit': model_info.rpm,
+                    'remaining': remaining,
+                    'error_count': model_info.error_count,
+                    'last_error': model_info.last_error,
+                    'is_available': calls_made < model_info.rpm
+                }
+        return status
+
     def _print_statistics(self):
         """Print processing statistics."""
         with self.stats_lock:
@@ -733,12 +952,13 @@ class QueueBasedProcessor:
             print(f"  - Failed: {self.stats['failed']}")
             print(f"  - Rate limited: {self.stats['rate_limited']}")
             print(f"  - Model switches: {self.stats['model_switches']}")
-        
-        print(f"\n🤖 Model Status:")
-        for model_name, model_info in self.models.items():
-            with model_info.lock:
-                remaining = model_info.rpm - len(model_info.calls)
-                print(f"  - {model_name}: {model_info.status.value}, {len(model_info.calls)}/{model_info.rpm} used, {remaining} remaining")
+            print(f"  - Retries: {self.stats['retries']}")
+            
+            # Show model usage with rate limits
+            print(f"\n🤖 Model Status:")
+            model_status = self.get_model_status()
+            for model_name, status in model_status.items():
+                print(f"  - {model_name}: {status['calls_made']}/{status['rpm_limit']} calls ({status['remaining']} remaining) - {status['status']}")
     
     def shutdown(self):
         """Shutdown the processor and stop all workers."""
