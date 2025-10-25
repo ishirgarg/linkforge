@@ -1,0 +1,2 @@
+brightdata-sdk
+python-dotenv
