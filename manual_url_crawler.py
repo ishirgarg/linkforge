@@ -58,39 +58,73 @@ def extract_all_urls_from_page(page_url: str) -> List[str]:
         return []
 
 def extract_urls_from_html(html_content: str, base_url: str) -> List[str]:
-    """Extract all URLs from HTML content."""
+    """Extract all URLs from HTML content, focusing on documentation links."""
     if not html_content:
         return []
     
-    # Find all href attributes
+    # Parse the base URL to get the domain
+    base_parsed = urlparse(base_url)
+    base_domain = base_parsed.netloc
+    
+    # Find all href attributes (these are the main navigation links)
     href_pattern = r'href=["\']([^"\']+)["\']'
     href_links = re.findall(href_pattern, html_content, re.IGNORECASE)
     
-    # Find all src attributes (for images, scripts, etc.)
-    src_pattern = r'src=["\']([^"\']+)["\']'
-    src_links = re.findall(src_pattern, html_content, re.IGNORECASE)
-    
-    # Find all URLs in text content
-    url_pattern = r'https?://[^\s<>"\'{}|\\^`\[\]]+'
-    text_urls = re.findall(url_pattern, html_content)
-    
-    # Combine all found URLs
-    all_links = href_links + src_links + text_urls
-    
     # Convert relative URLs to absolute URLs
     absolute_urls = []
-    for link in all_links:
+    for link in href_links:
         try:
             absolute_link = urljoin(base_url, link)
             absolute_urls.append(absolute_link)
         except:
             continue
     
-    # Remove duplicates and filter out invalid URLs
-    unique_urls = list(set(absolute_urls))
-    valid_urls = [url for url in unique_urls if is_valid_url(url)]
+    # Filter URLs to only include documentation pages
+    documentation_urls = []
+    for url in absolute_urls:
+        try:
+            parsed = urlparse(url)
+            # Only include URLs from the same domain
+            if parsed.netloc == base_domain:
+                # Filter out non-documentation URLs
+                if not is_non_documentation_url(url):
+                    documentation_urls.append(url)
+        except:
+            continue
     
-    return valid_urls
+    # Remove duplicates
+    unique_urls = list(set(documentation_urls))
+    
+    return unique_urls
+
+def is_non_documentation_url(url: str) -> bool:
+    """Check if URL is not a documentation page (CSS, JS, images, etc.)."""
+    # Common non-documentation URL patterns
+    non_doc_patterns = [
+        r'\.css$',
+        r'\.js$',
+        r'\.svg$',
+        r'\.png$',
+        r'\.jpg$',
+        r'\.jpeg$',
+        r'\.gif$',
+        r'\.ico$',
+        r'\.woff2?$',
+        r'\.ttf$',
+        r'\.eot$',
+        r'fonts\.googleapis\.com',
+        r'fonts\.gstatic\.com',
+        r'fontawesome\.com',
+        r'github\.com',
+        r'#__codelineno-',  # Code line references
+        r'#__codelineno-',  # Code line references
+    ]
+    
+    for pattern in non_doc_patterns:
+        if re.search(pattern, url, re.IGNORECASE):
+            return True
+    
+    return False
 
 def is_valid_url(url: str) -> bool:
     """Check if URL is valid."""
@@ -99,6 +133,65 @@ def is_valid_url(url: str) -> bool:
         return parsed.scheme in ['http', 'https'] and parsed.netloc
     except:
         return False
+
+def filter_documentation_urls(urls: List[str], base_url: str) -> List[str]:
+    """Filter and prioritize documentation URLs."""
+    base_parsed = urlparse(base_url)
+    base_domain = base_parsed.netloc
+    
+    # Categorize URLs
+    documentation_pages = []
+    other_pages = []
+    
+    for url in urls:
+        try:
+            parsed = urlparse(url)
+            
+            # Only include URLs from the same domain
+            if parsed.netloc != base_domain:
+                continue
+            
+            # Skip non-documentation URLs
+            if is_non_documentation_url(url):
+                continue
+            
+            # Categorize based on path
+            path = parsed.path.lower()
+            
+            # Prioritize main documentation pages
+            if (path == '/' or 
+                path.endswith('/') or 
+                not path.endswith(('.html', '.htm', '.php', '.asp', '.jsp')) or
+                'ref/' in path or
+                'docs/' in path or
+                'guide/' in path or
+                'tutorial/' in path or
+                'api/' in path):
+                documentation_pages.append(url)
+            else:
+                other_pages.append(url)
+                
+        except:
+            continue
+    
+    # Sort documentation pages by priority
+    def url_priority(url):
+        path = urlparse(url).path.lower()
+        if path == '/':
+            return 0  # Homepage first
+        elif 'quickstart' in path:
+            return 1  # Quickstart guides
+        elif 'guide' in path or 'tutorial' in path:
+            return 2  # Guides and tutorials
+        elif 'ref/' in path or 'api/' in path:
+            return 3  # API reference
+        else:
+            return 4  # Other pages
+    
+    documentation_pages.sort(key=url_priority)
+    
+    # Combine prioritized lists
+    return documentation_pages + other_pages
 
 def scrape_single_url(url: str) -> Dict[str, Any]:
     """
@@ -172,8 +265,16 @@ def crawl_manual_urls(documentation_url: str, max_urls: int = 50) -> List[Dict[s
         print("❌ No URLs found on the documentation page")
         return []
     
+    # Filter and prioritize documentation URLs
+    documentation_urls = filter_documentation_urls(all_urls, documentation_url)
+    
     # Limit the number of URLs to scrape
-    urls_to_scrape = all_urls[:max_urls]
+    urls_to_scrape = documentation_urls[:max_urls]
+    
+    print(f"\n📊 URL Analysis:")
+    print(f"  - Total URLs found: {len(all_urls)}")
+    print(f"  - Documentation URLs: {len(documentation_urls)}")
+    print(f"  - URLs to scrape: {len(urls_to_scrape)}")
     
     print(f"\n📋 URLs to scrape ({len(urls_to_scrape)}):")
     for i, url in enumerate(urls_to_scrape, 1):
@@ -237,7 +338,7 @@ def main():
     
     results = crawl_manual_urls(
         documentation_url=documentation_url,
-        max_urls=20  # Adjust as needed
+        max_urls=200  # Adjust as needed
     )
     
     print(f"\n🎉 Manual crawling complete!")
