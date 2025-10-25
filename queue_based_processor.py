@@ -34,6 +34,14 @@ from enum import Enum
 # Load environment variables
 load_dotenv()
 
+# Import vector database manager
+try:
+    from vector_db import ChromaVectorDB
+    VECTOR_DB_AVAILABLE = True
+except ImportError:
+    VECTOR_DB_AVAILABLE = False
+    print("⚠️ ChromaVectorDB not available. Install chromadb and sentence-transformers to enable vector database features.")
+
 class ModelStatus(Enum):
     AVAILABLE = "available"
     RATE_LIMITED = "rate_limited"
@@ -72,8 +80,18 @@ class ModelInfo:
             self.lock = threading.Lock()
 
 class QueueBasedProcessor:
-    def __init__(self, api_key: str = None, max_retries: int = 10):
-        """Initialize the queue-based processor with correct model names."""
+    def __init__(self, api_key: str = None, max_retries: int = 10, enable_vector_db: bool = True, 
+                 collection_name: str = "documentation", workers_per_model: int = None):
+        """
+        Initialize the queue-based processor with correct model names.
+        
+        Args:
+            api_key: Optional API key (otherwise loads from env)
+            max_retries: Maximum retries for failed chunks
+            enable_vector_db: Enable ChromaDB integration for embeddings
+            collection_name: Name of the ChromaDB collection
+            workers_per_model: Number of workers per model (default: auto-calculated from RPM)
+        """
         # Load all available API keys
         self.api_keys = []
         if api_key:
@@ -101,6 +119,31 @@ class QueueBasedProcessor:
         
         self.max_retries = max_retries
         self.api_key_lock = threading.Lock()  # Lock for thread-safe random selection
+        self.workers_per_model = workers_per_model  # Custom worker count per model
+        
+        # Initialize Vector Database
+        self.enable_vector_db = enable_vector_db and VECTOR_DB_AVAILABLE
+        self.vector_db = None
+        
+        if self.enable_vector_db:
+            try:
+                self.vector_db = ChromaVectorDB(
+                    path="./chroma_db",
+                    collection_name=collection_name,
+                    chunk_size=500,  # Words per chunk
+                    chunk_overlap=50  # Overlapping words
+                )
+                print(f"✅ Vector database enabled (Qwen 0.6B embeddings)")
+                print(f"   Collection: {collection_name}")
+                print(f"   Chunk size: 500 words with 50 word overlap")
+            except Exception as e:
+                print(f"⚠️ Could not initialize vector database: {str(e)}")
+                print(f"   Make sure sentence-transformers is installed")
+                print(f"   Install with: pip install sentence-transformers")
+                self.enable_vector_db = False
+        elif enable_vector_db and not VECTOR_DB_AVAILABLE:
+            print(f"⚠️ Vector database requested but dependencies not installed")
+            print(f"   Install with: pip install chromadb sentence-transformers")
         
         # Correct model configurations (based on your actual rate limits)
         self.models = {
@@ -181,9 +224,13 @@ class QueueBasedProcessor:
     def _start_workers(self):
         """Start worker threads for each model."""
         for model_name in self.models.keys():
-            # Use more workers for higher RPM models
-            rpm = self.models[model_name].rpm
-            worker_count = max(1, min(3, rpm // 5))  # 1-3 workers based on RPM
+            # Use custom worker count or auto-calculate based on RPM
+            if self.workers_per_model:
+                worker_count = self.workers_per_model
+            else:
+                # Use more workers for higher RPM models
+                rpm = self.models[model_name].rpm
+                worker_count = max(1, min(3, rpm // 5))  # 1-3 workers based on RPM
             
             for i in range(worker_count):
                 worker = threading.Thread(
@@ -887,6 +934,27 @@ class QueueBasedProcessor:
                 self.document_status[url]['written_at'] = time.time()
         
         print(f"💾 Document {doc_index} written: {filename}")
+        
+        # Embed into vector database (if enabled)
+        if self.enable_vector_db and self.vector_db:
+            print(f"🔄 Starting embedding for document {doc_index}...")
+            try:
+                # Create a unique ID for this document
+                doc_id = f"doc_{doc_index}_{url.split('/')[-1]}"
+                print(f"   Document ID: {doc_id}")
+                print(f"   Content length: {len(markdown_content)} characters")
+                
+                # Insert the markdown content (ChromaVectorDB will handle chunking)
+                print(f"   Calling vector_db.insert()...")
+                self.vector_db.insert(
+                    documents=[markdown_content],
+                    ids=[doc_id]
+                )
+                print(f"✅ Embedded document into vector DB (ID: {doc_id})")
+            except Exception as e:
+                print(f"❌ Vector DB embedding failed: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
     def _save_markdown(self, markdown_content: str, url: str, index: int) -> str:
         """Save markdown content to a file."""
@@ -959,6 +1027,20 @@ class QueueBasedProcessor:
             model_status = self.get_model_status()
             for model_name, status in model_status.items():
                 print(f"  - {model_name}: {status['calls_made']}/{status['rpm_limit']} calls ({status['remaining']} remaining) - {status['status']}")
+            
+            # Show vector database stats
+            if self.enable_vector_db and self.vector_db:
+                print(f"\n🔍 Vector Database Stats:")
+                try:
+                    # Get collection count
+                    count = self.vector_db.collection.count()
+                    print(f"  - Total chunks: {count}")
+                    print(f"  - Collection: {self.vector_db.collection.name}")
+                    print(f"  - Embedding model: Qwen/Qwen3-Embedding-0.6B")
+                    print(f"  - Chunk size: {self.vector_db.chunk_size} words")
+                    print(f"  - Chunk overlap: {self.vector_db.chunk_overlap} words")
+                except Exception as e:
+                    print(f"  ⚠️ Could not retrieve stats: {str(e)}")
     
     def shutdown(self):
         """Shutdown the processor and stop all workers."""
