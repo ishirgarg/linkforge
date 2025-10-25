@@ -2,3 +2,4 @@ brightdata-sdk
 python-dotenv
 transformers
 torch
+sentence_transformers
