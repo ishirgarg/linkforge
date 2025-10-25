@@ -17,16 +17,117 @@ import threading
 # Import our modules
 from manual_url_crawler import crawl_manual_urls
 from vector_db import ChromaVectorDB
-from groq_processor import process_documents_with_groq
 
 # Load environment variables
 load_dotenv()
 
 
-# chunk_html_content, combine_chunks, create_prompt, and ChunkTask are imported from groq_processor
+def chunk_html_content(html_content: str, max_chunk_size: int = 8000) -> List[str]:
+    """Simple chunking function for HTML content."""
+    import re
+    if len(html_content) <= max_chunk_size:
+        return [html_content]
+
+    # Detect if HTML
+    is_html = bool(re.search(r'<[^>]+>', html_content))
+    pattern = r'(<h[1-3][^>]*>.*?</h[1-3]>)' if is_html else r'(^#{1,3}\s+.*$)'
+    parts = re.split(pattern, html_content, flags=re.IGNORECASE|re.MULTILINE|re.DOTALL)
+
+    chunks, current = [], ""
+    for part in parts:
+        if len(current + part) <= max_chunk_size:
+            current += part
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = part
+    if current:
+        chunks.append(current.strip())
+    return chunks
 
 
-# process_single_document function removed - now using groq_processor.process_documents_with_groq
+def combine_chunks(chunks: List[str]) -> str:
+    """Combine processed chunks into single markdown."""
+    return "\n\n".join(chunks)
+
+
+def process_single_document(page, groq_client, vector_db, output_dir, doc_index, enable_vector_db):
+    """Process a single document with Groq and optionally embed it."""
+    url = page.get("url", f"doc_{doc_index}")
+    status = page.get("status")
+    raw_result = page.get("raw_result", "")
+    
+    print(f"📄 Processing {doc_index}: {url}")
+    
+    if status != "success" or not raw_result:
+        print(f"⚠️ Skipping {doc_index} (no content or error)")
+        page["markdown_content"] = None
+        page["markdown_file"] = None
+        return page, False
+    
+    try:
+        # Chunk the HTML content
+        html_content = str(raw_result)
+        chunks = chunk_html_content(html_content)
+        print(f"   Split into {len(chunks)} chunks")
+        
+        # Process each chunk with Groq
+        processed_chunks = []
+        for j, chunk in enumerate(chunks, 1):
+            print(f"   Processing chunk {j}/{len(chunks)}...", end=" ")
+            try:
+                response = groq_client.chat.completions.create(
+                    messages=[{
+                        "role": "user", 
+                        "content": f"Convert this HTML documentation to clean, well-structured markdown. Preserve code blocks, headings, and technical details:\n\n{chunk}"
+                    }],
+                    model="llama-3.3-70b-versatile"
+                )
+                processed_chunks.append(response.choices[0].message.content)
+                print("✅")
+            except Exception as chunk_error:
+                print(f"❌ Chunk {j} failed: {str(chunk_error)}")
+                processed_chunks.append(f"# Error Processing Chunk {j}\n\n{str(chunk_error)}")
+        
+        # Combine chunks
+        markdown_content = combine_chunks(processed_chunks)
+        
+        # Save markdown file
+        url_safe = url.replace('https://', '').replace('http://', '').replace('/', '_')
+        filename = f"{doc_index:03d}_{url_safe}.md"
+        filepath = output_dir / filename
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+        
+        page["markdown_content"] = markdown_content
+        page["markdown_file"] = str(filepath)
+        
+        print(f"   💾 Saved: {filepath}")
+        
+        # Embed into vector database (if enabled)
+        if enable_vector_db and vector_db:
+            print(f"   🔄 Embedding into vector database...", end=" ")
+            try:
+                doc_id = f"doc_{doc_index}_{url.split('/')[-1]}"
+                vector_db.insert(
+                    documents=[markdown_content],
+                    ids=[doc_id]
+                )
+                print("✅")
+            except Exception as e:
+                print(f"❌ Embedding failed: {str(e)}")
+        
+        return page, True
+        
+    except Exception as e:
+        print(f"   ❌ Error processing {doc_index}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        page["markdown_content"] = None
+        page["markdown_file"] = None
+        page["error"] = str(e)
+        return page, False
 
 
 def run_full_pipeline(documentation_url: str, max_urls: int = 20, 
@@ -43,12 +144,12 @@ def run_full_pipeline(documentation_url: str, max_urls: int = 20,
         enable_vector_db: Enable ChromaDB integration for embeddings
         collection_name: Name for the ChromaDB collection (auto-generated if None)
     """
-    print("Full Documentation Pipeline (Groq + ChromaDB)")
+    print("🚀 Full Documentation Pipeline (Groq + ChromaDB)")
     print("=" * 60)
-    print(f"Target: {documentation_url}")
-    print(f"Max URLs: {max_urls}")
-    print(f"Crawler Workers: {crawler_workers}")
-    print(f"Vector DB: {'Enabled' if enable_vector_db else 'Disabled'}")
+    print(f"📚 Target: {documentation_url}")
+    print(f"📊 Max URLs: {max_urls}")
+    print(f"🕷️ Crawler Workers: {crawler_workers}")
+    print(f"🔍 Vector DB: {'Enabled' if enable_vector_db else 'Disabled'}")
     print()
     
     # Auto-generate collection name from URL if not provided
@@ -106,81 +207,80 @@ def run_full_pipeline(documentation_url: str, max_urls: int = 20,
         return
     
     print(f"✅ Crawled {len(scraped_data)} pages")
-    
-    # Create organized output directories
-    output_dir = Path("documentation_markdown")
-    crawl_dir = Path("manual_crawl_results")
-    output_dir.mkdir(exist_ok=True)
-    crawl_dir.mkdir(exist_ok=True)
-    
-    # Save crawl results to dedicated folder
-    timestamp = int(time.time())
-    crawl_file = crawl_dir / f"crawl_results_{timestamp}.json"
-    with open(crawl_file, 'w', encoding='utf-8') as f:
-        json.dump({
-            "crawl_info": {
-                "documentation_url": documentation_url,
-                "max_urls": max_urls,
-                "crawled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "total_pages": len(scraped_data),
-                "successful_pages": len([p for p in scraped_data if p.get('status') == 'success']),
-                "failed_pages": len([p for p in scraped_data if p.get('status') != 'success'])
-            },
-            "scraped_data": scraped_data
-        }, f, indent=2, ensure_ascii=False)
-    print(f"💾 Crawl results saved to: {crawl_file}")
     print()
     
-    # Step 2: Process with Groq to create markdown
-    print("🤖 STEP 2: Converting to Markdown with Groq...")
+    # Step 2: Process with Groq to create markdown (CONCURRENT)
+    print("🤖 STEP 2: Converting to Markdown with Groq (CONCURRENT)...")
     print("-" * 60)
     
-    # Process documents with Groq (sequential for now, can be made concurrent later)
-    processed_data = process_documents_with_groq(scraped_data, str(output_dir))
+    output_dir = Path("documentation_markdown")
+    output_dir.mkdir(exist_ok=True)
     
-    # Count successful/failed
-    successful = len([p for p in processed_data if p.get('markdown_content')])
-    failed = len(processed_data) - successful
+    processed_data = []
+    successful = 0
+    failed = 0
     
-    # Step 3: Embed into vector database
+    print(f"📊 Processing {len(scraped_data)} documents concurrently...")
+    
+    # Use ThreadPoolExecutor for concurrent processing
+    max_workers = min(5, len(scraped_data))  # Limit concurrent Groq requests
+    print(f"🔧 Using {max_workers} concurrent workers")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {}
+        for i, page in enumerate(scraped_data, 1):
+            future = executor.submit(
+                process_single_document, 
+                page, 
+                groq_client, 
+                vector_db, 
+                output_dir, 
+                i, 
+                enable_vector_db
+            )
+            future_to_index[future] = i
+        
+        # Process completed tasks as they finish
+        for future in as_completed(future_to_index):
+            doc_index = future_to_index[future]
+            try:
+                page, success = future.result()
+                processed_data.append(page)
+                if success:
+                    successful += 1
+                    print(f"✅ Document {doc_index} completed successfully")
+                else:
+                    failed += 1
+                    print(f"❌ Document {doc_index} failed")
+            except Exception as e:
+                print(f"❌ Document {doc_index} exception: {str(e)}")
+                failed += 1
+                # Create error page
+                error_page = scraped_data[doc_index - 1].copy()
+                error_page["markdown_content"] = None
+                error_page["markdown_file"] = None
+                error_page["error"] = str(e)
+                processed_data.append(error_page)
+    
+    # Sort processed_data by original order (fix the sorting logic)
+    # Create a mapping of pages to their original indices
+    url_to_index = {page['url']: i for i, page in enumerate(scraped_data)}
+    processed_data.sort(key=lambda x: url_to_index.get(x.get('url', ''), 999))
+    
+    print(f"\n✅ All documents processed!")
+    print(f"   Successful: {successful}")
+    print(f"   Failed: {failed}")
+    
+    # Ensure ChromaDB is persisted
     if enable_vector_db and vector_db:
-        print(f"\n🔍 STEP 3: Embedding into vector database...")
-        print("-" * 60)
-        
-        embedded_count = 0
-        total_to_embed = len([p for p in processed_data if p.get('markdown_content')])
-        print(f"📊 Embedding {total_to_embed} documents...")
-        
-        for i, page in enumerate(processed_data, 1):
-            if page.get('markdown_content'):
-                try:
-                    print(f"🔄 Embedding document {i}/{total_to_embed}: {page['url']}...", end=" ")
-                    doc_id = f"doc_{i}_{page['url'].split('/')[-1]}"
-                    
-                    # Try embedding with better error handling
-                    try:
-                        vector_db.insert(
-                            documents=[page['markdown_content']],
-                            ids=[doc_id]
-                        )
-                        embedded_count += 1
-                        print("✅")
-                    except Exception as embed_error:
-                        print("❌")
-                        print(f"❌ Failed to embed document {i}: {str(embed_error)}")
-                        print(f"   Error type: {type(embed_error).__name__}")
-                        # Don't print full traceback for embedding errors to avoid spam
-                        
-                except Exception as e:
-                    print(f"❌ Failed to embed document {i}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-        
-        print(f"\n📊 Embedding Summary:")
-        print(f"  - Total documents: {len(processed_data)}")
-        print(f"  - Documents with content: {total_to_embed}")
-        print(f"  - Successfully embedded: {embedded_count}")
-        print(f"  - Failed: {total_to_embed - embedded_count}")
+        try:
+            print(f"\n💾 Persisting vector database...")
+            # Force ChromaDB to persist by getting count
+            count = vector_db.collection.count()
+            print(f"   Total chunks in DB: {count}")
+        except Exception as e:
+            print(f"   ⚠️ Warning: Could not verify DB persistence: {str(e)}")
     
     # Step 4: Save results
     print("\n💾 STEP 3: Saving results...")
@@ -231,63 +331,53 @@ def run_full_pipeline(documentation_url: str, max_urls: int = 20,
     print(f"\n📖 Your documentation is ready in the '{output_dir}' folder!")
     if enable_vector_db:
         print(f"🔎 Use search_docs.py to query the documentation!")
-        
-        # Test ChromaDB with a simple query
-        print(f"\n🔍 STEP 4: Testing ChromaDB with sample query...")
-        print("-" * 60)
-        try:
-            test_query = "How to create a Streamlit app?"
-            print(f"Query: '{test_query}'")
-            
-            results = vector_db.query(test_query, n_results=3)
-            
-            if results['documents'] and results['documents'][0]:
-                print(f"✅ Found {len(results['documents'][0])} relevant results:")
-                for i, doc in enumerate(results['documents'][0], 1):
-                    doc_id = results['ids'][0][i-1] if 'ids' in results and results['ids'] else f"doc_{i}"
-                    distance = results['distances'][0][i-1] if 'distances' in results and results['distances'] else 0.0
-                    print(f"\n  Result {i} (ID: {doc_id}, Distance: {distance:.4f}):")
-                    print(f"  {doc[:200]}...")
-            else:
-                print("❌ No results found")
-        except Exception as e:
-            print(f"❌ Query test failed: {str(e)}")
 
 
 def main():
     """Main function to run the pipeline."""
-    # Configuration
-    documentation_url = "https://docs.streamlit.io/develop/api-reference"
-    max_urls = 1  # Adjust as needed
-    crawler_workers = 200  # Concurrent web scraping
-    
-    # Check if API keys are available
-    groq_key = os.getenv('Grok')
-    brightdata_key = os.getenv('BRIGHT_DATA_API_TOKEN')
-    
-    if not groq_key:
-        print("❌ Grok API key not found in environment variables.")
-        print("Please add it to your .env file:")
-        print("Grok=your_groq_api_key_here")
-        return
-    
-    if not brightdata_key:
-        print("❌ BRIGHT_DATA_API_TOKEN not found in environment variables.")
-        print("Please add it to your .env file:")
-        print("BRIGHT_DATA_API_TOKEN=your_brightdata_api_key_here")
-        return
-    
-    print("API keys found. Starting pipeline...")
-    print()
-    
-    # Run the pipeline
-    run_full_pipeline(
-        documentation_url=documentation_url,
-        max_urls=max_urls,
-        crawler_workers=crawler_workers,
-        enable_vector_db=True
-    )
+    try:
+        # Configuration
+        documentation_url = "https://docs.streamlit.io/develop/api-reference"
+        max_urls = 5  # Adjust as needed
+        crawler_workers = 200  # Concurrent web scraping
+        
+        # Check if API keys are available
+        groq_key = os.getenv('Grok')
+        brightdata_key = os.getenv('BRIGHT_DATA_API_TOKEN')
+        
+        if not groq_key:
+            print("❌ Grok API key not found in environment variables.")
+            print("Please add it to your .env file:")
+            print("Grok=your_groq_api_key_here")
+            return
+        
+        if not brightdata_key:
+            print("❌ BRIGHT_DATA_API_TOKEN not found in environment variables.")
+            print("Please add it to your .env file:")
+            print("BRIGHT_DATA_API_TOKEN=your_brightdata_api_key_here")
+            return
+        
+        print("API keys found. Starting pipeline...")
+        print()
+        
+        # Run the pipeline
+        run_full_pipeline(
+            documentation_url=documentation_url,
+            max_urls=max_urls,
+            crawler_workers=crawler_workers,
+            enable_vector_db=True
+        )
+        
+        print("\n✅ Pipeline completed successfully!")
+        
+    except Exception as e:
+        print(f"\n❌ Pipeline failed with error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    exit_code = main()
+    if exit_code:
+        exit(exit_code)
