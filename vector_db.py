@@ -8,7 +8,6 @@ class VectorDB(ABC):
     def __init__(self):
         self.model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
 
-    """Abstract interface for text-based vector databases."""
     def get_text_embedding(self, text: List[str]):
         """
         Given a text document, returns a vector embedding using a Qwen model.
