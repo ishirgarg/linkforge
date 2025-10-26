@@ -22,8 +22,9 @@ export default function App() {
                 body: JSON.stringify({
                     tool: "process_documentation_url",
                     arguments: {
-                        url,
+                        url,               // URL of the documentation
                         max_urls: MAX_URLS,
+                        collection_name: url // Use URL itself as collection name
                     },
                 }),
             });

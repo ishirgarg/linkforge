@@ -175,66 +175,45 @@ async def process_documentation_url(url: str, max_urls: int = 20, crawler_worker
 
 
 @mcp.tool()
-async def query_documentation(query: str, collection_name: str, max_results: int = 5, enhance_with_claude: bool = True) -> str:
-    """STEP 3: Search the embedded documentation using semantic search with Claude enhancement.
-    
-    This tool performs semantic search on processed documentation using vector embeddings,
-    then uses Claude to enhance the results with better explanations and code examples.
-    
-    PREREQUISITE: Documentation must be processed first (use process_documentation_url)
-    
-    Args:
-        query: Natural language search query (e.g., "how to authenticate users")
-        collection_name: Name of the collection to search (returned from process_documentation_url)
-        max_results: Maximum number of results to return (default: 5, recommended: 3-10)
-        enhance_with_claude: Use Claude to enhance results with examples (default: True)
-    
-    Returns:
-        Search results with:
-        - Claude-enhanced explanation and code examples (if enabled)
-        - Original documentation chunks with similarity scores
-        - Document IDs and sources
-    
-    TIP: Use specific queries for better results. Instead of "authentication", try "how to implement user authentication"
-    """
+async def query_documentation(
+    query: str, 
+    collection_name: str, 
+    max_results: int = 5, 
+    enhance_with_claude: bool = True
+) -> str:
+    """Search the embedded documentation using semantic search with optional Claude enhancement."""
     try:
-        # Get or create vector DB
-        if collection_name not in vector_dbs:
-            vector_db = ChromaVectorDB(
-                path="./chroma_db",
-                collection_name=collection_name,
-                chunk_size=500,
-                chunk_overlap=50
-            )
-            vector_dbs[collection_name] = vector_db
-        
-        vector_db = vector_dbs[collection_name]
-        
+        # Use the shared ChromaDB client to create the vector DB object for this collection
+        vector_db = ChromaVectorDB(
+            client=chroma_client,
+            collection_name=collection_name,
+            chunk_size=500,
+            chunk_overlap=50
+        )
+
         # Perform search
         results = vector_db.query(query, n_results=max_results)
-        
+
         if not results['documents'] or not results['documents'][0]:
             return f"No results found for query: '{query}'"
-        
-        # Format results
+
         documents = results['documents'][0]
         ids = results['ids'][0] if 'ids' in results else []
         distances = results['distances'][0] if 'distances' in results else [0] * len(documents)
-        
+
         # Combine all retrieved chunks for Claude
         combined_docs = "\n\n---\n\n".join(documents)
-        
+
         result_text = f"🔍 Search Results for: '{query}'\n"
         result_text += f"📚 Collection: {collection_name}\n"
         result_text += f"Found {len(documents)} results\n\n"
-        
-        # Enhance with Claude if available and enabled
+
+        # Enhance with Claude if available
         if enhance_with_claude and CLAUDE_AVAILABLE and CLAUDE_API_KEY:
             try:
                 result_text += "🤖 Claude-Enhanced Response\n"
                 result_text += "=" * 60 + "\n\n"
-                
-                # Create prompt for Claude
+
                 claude_prompt = f"""Based on the following documentation chunks, provide a comprehensive answer to the user's question: "{query}"
 
 Your response should:
@@ -248,29 +227,25 @@ Documentation chunks:
 
 Please provide a well-structured response with code examples where appropriate."""
 
-                # Call Claude API
-                # Using Claude Sonnet 4.5 - the smartest model for complex agents and coding
                 message = claude_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=2000,
-                    messages=[
-                        {"role": "user", "content": claude_prompt}
-                    ]
+                    messages=[{"role": "user", "content": claude_prompt}]
                 )
-                
+
                 claude_response = message.content[0].text
                 result_text += claude_response + "\n\n"
                 result_text += "=" * 60 + "\n\n"
-                
+
             except Exception as e:
                 logger.error(f"Claude enhancement failed: {e}")
                 result_text += f"⚠️ Claude enhancement unavailable: {str(e)}\n\n"
                 result_text += "=" * 60 + "\n\n"
-        
+
         # Add original documentation chunks
         result_text += "📖 Original Documentation Chunks\n"
         result_text += "=" * 60 + "\n\n"
-        
+
         for i, (doc, doc_id, distance) in enumerate(zip(documents, ids, distances), 1):
             similarity = 1 - distance
             result_text += f"📄 Chunk {i} (Similarity: {similarity:.2%})\n"
@@ -278,11 +253,12 @@ Please provide a well-structured response with code examples where appropriate."
             result_text += "-" * 60 + "\n"
             result_text += f"{doc[:800]}{'...' if len(doc) > 800 else ''}\n\n"
             result_text += "=" * 60 + "\n\n"
-        
+
         return result_text
-        
+
     except Exception as e:
         return f"Error querying documentation: {str(e)}"
+
 
 
 @mcp.tool()
