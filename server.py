@@ -135,8 +135,7 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
 
 
 @mcp.tool()
-async def process_documentation_url(url: str, max_urls: int = 20, crawler_workers: int = 50,
-                                    collection_name: str = None) -> str:
+async def process_documentation_url(url: str, collection_name: str, max_urls: int = 20, crawler_workers: int = 50) -> str:
     """STEP 1: Process a documentation website and embed it for semantic search."""
     job_id = str(uuid.uuid4())
 

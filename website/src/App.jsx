@@ -7,7 +7,7 @@ export default function App() {
     const [loading, setLoading] = useState(false);
 
     // default max_urls
-    const MAX_URLS = 100;
+    const MAX_URLS = 2;
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -15,44 +15,51 @@ export default function App() {
         setResponse(null);
 
         try {
-            // call your MCP server's endpoint
-            const res = await fetch("http://localhost:8000/mcp", {
+            // Call your MCP server endpoint
+            const res = await fetch("/mcp", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
                 body: JSON.stringify({
                     tool: "process_documentation_url",
                     arguments: {
-                        url,               // URL of the documentation
+                        url,
                         max_urls: MAX_URLS,
-                        collection_name: url // Use URL itself as collection name
+                        collection_name: url
                     },
                 }),
             });
 
+            if (!res.ok) {
+                throw new Error(`HTTP error: ${res.status}`);
+            }
+
             const data = await res.json();
 
             setResponse({
-                domain: "your-mcp-server.com",
+                domain: "localhost:8000",
                 result: data,
                 tools: [
                     {
                         name: "list_collections",
                         description:
                             "List all documentation collections available in the MCP server database.",
-                        example: "“List all available documentation collections.”",
+                        example: "List all available documentation collections.",
                     },
                     {
-                        name: "query_collections",
+                        name: "query_documentation",
                         description:
                             "Query documentation collections to find relevant information.",
                         example:
-                            "“Search the API documentation for how to authenticate requests.”",
+                            "Search the API documentation for how to authenticate requests.",
                     },
                 ],
             });
         } catch (err) {
             console.error(err);
-            setResponse({ error: "Failed to reach MCP server." });
+            setResponse({ error: `Failed to reach MCP server: ${err.message}` });
         } finally {
             setLoading(false);
         }
@@ -101,15 +108,11 @@ export default function App() {
                                     Connected to: {response.domain}
                                 </h2>
 
-                                <p className="text-gray-700">
-                                    Available tools you can query:
-                                </p>
+                                <p className="text-gray-700">Available tools you can query:</p>
                                 <ul className="space-y-4">
                                     {response.tools.map((tool, idx) => (
                                         <li key={idx} className="bg-white rounded-lg shadow p-4">
-                                            <p className="font-semibold text-indigo-700">
-                                                {tool.name}
-                                            </p>
+                                            <p className="font-semibold text-indigo-700">{tool.name}</p>
                                             <p className="text-gray-600">{tool.description}</p>
                                             <p className="text-sm text-gray-500 mt-2">
                                                 Example: <em>{tool.example}</em>
@@ -119,9 +122,7 @@ export default function App() {
                                 </ul>
 
                                 <div className="mt-6 bg-white rounded-lg p-4 shadow">
-                                    <p className="font-semibold text-indigo-700 mb-2">
-                                        Tool response:
-                                    </p>
+                                    <p className="font-semibold text-indigo-700 mb-2">Tool response:</p>
                                     <pre className="text-sm text-gray-700 whitespace-pre-wrap break-words">
                                         {JSON.stringify(response.result, null, 2)}
                                     </pre>
