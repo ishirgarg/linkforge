@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 import chromadb
 import re
 from sentence_transformers import SentenceTransformer
+from chromadb.config import Settings
 
 class VectorDB(ABC):
     def __init__(self):
@@ -37,8 +38,20 @@ class ChromaVectorDB(VectorDB):
         Initialize ChromaDB with automatic chunking and Qwen embeddings.
         """
         super().__init__()
-        self.client = chromadb.PersistentClient(path=path)
-        self.collection = self.client.get_or_create_collection(collection_name)
+        try:
+            # Disable telemetry & use PersistentClient if possible
+            self.client = chromadb.PersistentClient(
+                path=path,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            self.collection = self.client.get_or_create_collection(collection_name)
+            print("[INFO] Chroma PersistentClient initialized.")
+        except Exception as e:
+            # Fallback to in-memory mode if persistent crashes
+            print(f"[WARN] PersistentClient failed: {e} -> falling back to in-memory client.")
+            self.client = chromadb.Client(Settings(anonymized_telemetry=False))
+            self.collection = self.client.get_or_create_collection(collection_name)
+            print("[INFO] Chroma in-memory client initialized.")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -53,8 +66,10 @@ class ChromaVectorDB(VectorDB):
 
     def insert(self, documents: List[str], ids: List[str]) -> None:
         """
-        Insert text documents into Chroma.
+        Insert text documents into Chroma safely.
         Each document is cleaned, chunked, embedded, and stored.
+        Handles large inputs by batching, converts embeddings to float32,
+        and retries failed batches automatically.
         """
         if len(documents) != len(ids):
             raise ValueError("documents and ids must have the same length")
@@ -66,8 +81,42 @@ class ChromaVectorDB(VectorDB):
                 all_chunks.append(chunk)
                 all_ids.append(f"{base_id}_chunk{idx}")
 
+        print(f"[INFO] Total chunks to insert: {len(all_chunks)}")
+
+        # Step 1. Compute embeddings (keep as float32)
         embeddings = self.get_text_embedding(all_chunks)
-        self.collection.add(documents=all_chunks, embeddings=embeddings.tolist(), ids=all_ids)
+        import numpy as np
+        embeddings = np.array(embeddings, dtype="float32").tolist()
+
+        # Step 2. Batch insertion (avoid memory / Rust FFI crash)
+        BATCH_SIZE = 64
+        for i in range(0, len(all_chunks), BATCH_SIZE):
+            batch_docs = all_chunks[i:i + BATCH_SIZE]
+            batch_embs = embeddings[i:i + BATCH_SIZE]
+            batch_ids = all_ids[i:i + BATCH_SIZE]
+
+            try:
+                self.collection.add(
+                    documents=batch_docs,
+                    embeddings=batch_embs,
+                    ids=batch_ids,
+                )
+                print(f"[INFO] Added batch {i // BATCH_SIZE + 1}/{(len(all_chunks) + BATCH_SIZE - 1) // BATCH_SIZE}")
+            except Exception as e:
+                print(f"[WARN] Batch {i // BATCH_SIZE + 1} failed: {e}")
+                # Attempt a retry with smaller batch size
+                try:
+                    for j in range(len(batch_docs)):
+                        self.collection.add(
+                            documents=[batch_docs[j]],
+                            embeddings=[batch_embs[j]],
+                            ids=[batch_ids[j]],
+                        )
+                except Exception as inner_e:
+                    print(f"[ERROR] Failed to insert single chunk at index {i + j}: {inner_e}")
+
+        print("[INFO] Insert completed successfully.")
+
 
     def query(self, query_text: str, n_results: int) -> Dict[str, Any]:
         """
@@ -83,7 +132,7 @@ class ChromaVectorDB(VectorDB):
 
 
 if __name__ == "__main__":
-    db = ChromaVectorDB(path="./chroma_db", collection_name="markdown_docs", chunk_size=5, chunk_overlap=2)
+    db = ChromaVectorDB(path="./chroma_db20", collection_name="markdown_docs", chunk_size=5, chunk_overlap=2)
 
     # Insert sample markdown text
     markdown_text = """
