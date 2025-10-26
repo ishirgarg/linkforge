@@ -207,6 +207,33 @@ async def process_documentation_endpoint(request: ProcessDocRequest):
         "message": "Documentation processing started"
     }
 
+@rest_app.get("/api/status/{job_id}")
+async def get_job_status_endpoint(job_id: str):
+    """Simple HTTP endpoint to get job status."""
+    if job_id not in processing_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    job = processing_jobs[job_id]
+    
+    response = {
+        "job_id": job_id,
+        "status": job['status'],
+        "url": job['url'],
+        "collection_name": job['collection_name'],
+        "progress": job['progress'],
+        "message": job['message'],
+        "started_at": job['started_at']
+    }
+
+    if job['status'] == 'completed':
+        response['completed_at'] = job.get('completed_at')
+        response['elapsed_time'] = job.get('completed_at', 0) - job['started_at']
+    elif job['status'] == 'failed':
+        response['error'] = job.get('error', 'Unknown error')
+    else:
+        response['elapsed_time'] = time.time() - job['started_at']
+
+    return response
 
 # ============================================================================
 # MCP TOOL ENDPOINTS (Original)

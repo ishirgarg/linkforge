@@ -1,0 +1,46 @@
+{
+  "crawl_info": {
+    "documentation_url": "http://google.com",
+    "total_urls_found": 6,
+    "urls_scraped": 2,
+    "successful_scrapes": 2,
+    "failed_scrapes": 0,
+    "crawled_at": "2025-10-26 01:25:49"
+  },
+  "all_urls_found": [
+    "https://google.com/search/howsearchworks/?fg=1",
+    "http://google.com#ZnpjSd",
+    "http://google.com/xjs/_/ss/k=xjs.hd.z4pbJaF38eM.L.B1.O/am=AIAACAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAABHYIAAAAAHAAAAAAAAAAKQAAAAAAAAAQAAAAAAEAAAEAAAAAAAAAAAAAAAAAAAAIAAAAACAAQAAhAAAAQAEAAAAAAAAAAAAAAAQBIAAAAgAAAAAwIAEMQBhAAAAAIAMAAAAEAAAAAAAACACABEAAAgAAAAAAAAABAAAEEAAOgiAgKkAAAIAAAAAAACAAAAAAAAgAEBAIAAAABAAQABgCICAgAPAGCAwAAABBEAAAqAcAIAAQAAAIAAAAAAAAAAAwAgAAAGABMIgiAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACg/d=1/ed=1/br=1/rs=ACT90oEMxJ6OpG1e-x7puuhpnGLZH6ZhJw/m=cdos,hsm,jsa,mb4ZUb,cEt90b,SNUn3,qddgKe,sTsDMc,dtl0hd,eHDfl,YV5bee,d,csi",
+    "http://google.com/history/optout?hl=en&amp;fg=1",
+    "http://google.com/advanced_search?hl=en&amp;fg=1",
+    "http://google.com/history/privacyadvisor/search/unauth?utm_source=googlemenu&amp;fg=1&amp;cctld=com"
+  ],
+  "scraped_data": [
+    {
+      "url": "https://google.com/search/howsearchworks/?fg=1",
+      "content": {
+        "type": "html",
+        "raw_length": 30,
+        "title": null,
+        "text": "this endpoint is not supported"
+      },
+      "raw_result": "this endpoint is not supported",
+      "status": "success",
+      "content_length": 4,
+      "timestamp": 1761467148.439862
+    },
+    {
+      "url": "http://google.com#ZnpjSd",
+      "content": {
+        "type": "html",
+        "raw_length": 2204,
+        "title": null,
+        "text": "Google\n[About](https://about.google/?fg=1&utm_source=google-US&utm_medium=referral&utm_campaign=hp-header)[Store](https://store.google.com/US?utm_source=hp_header&utm_medium=google_ooo&utm_campaign=GS100042&hl=en-US)\n[Gmail](https://mail.google.com/mail/&ogbl)\n[Images](https://www.google.com/imghp?hl=en&ogbl)\n[](https://www.google.com/intl/en/about/products)\n[Sign in](https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/%3Fgl%3Dus%26uule%3Dw%2BCAIQICINVW5pdGVkIFN0YXRlcw%26hl%3Den&ec=futura_exp_og_so_72776762_e)\nAI Mode\n*\n* * *\nSee more\nDelete\n*\n*\nDelete\nReport inappropriate predictions\n[Advertising](https://www.google.com/intl/en_us/ads/?subid=ww-ww-et-g-awa-a-g_hpafoot1_1!o2&utm_source=google.com&utm_medium=referral&utm_campaign=google_hpafooter&fg=1)[Business](https://www.google.com/services/?subid=ww-ww-et-g-awa-a-g_hpbfoot1_1!o2&utm_source=google.com&utm_medium=referral&utm_campaign=google_hpbfooter&fg=1) [How Search works](https://google.com/search/howsearchworks/?fg=1)\n[![](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABUAAAAYCAMAAAAiV0Z6AAAAPFBMVEVLoEN0wU6CzFKCzFKCzFKCzFKCzFJSo0MSczNDmkCCzFJPoUMTczNdr0gmgziCzFITczMTczMTczMTczPh00jOAAAAFHRSTlPF/+bIsms8Ad///hX+//5/tXw7aMEAx10AAACaSURBVHgBbc4HDoRQCATQ33tbvf9dF9QxaCT9UQaltLHOh/golXKhMs5Xqa0xU1lyoa2fXFyQOsDG38qsLy4TaV+sFislovyhPzLJJrBu6eQOtpW0LjbJkzTuTDLRVNKa3uxJI+VdiRqXSeu6GW+Qxi29eLIi8H7EsYrT42BD+mQtNO5JMjRuC4lSY8V4hsLX0egGijvUSEP9AbylEsOkeCgWAAAAAElFTkSuQmCC)Applying AI towards science and the environment](https://ai.google/societal-impact/?utm_source=googlehpfooter&utm_medium=housepromos&utm_campaign=bottom-footer)\n[Privacy](https://policies.google.com/privacy?hl=en&fg=1)[Terms](https://policies.google.com/terms?hl=en&fg=1)\nSettings\n[Search settings](https://www.google.com/preferences?hl=en&fg=1)\n[Advanced search](/advanced_search?hl=en&fg=1)\n[Your data in Search](/history/privacyadvisor/search/unauth?utm_source=googlemenu&fg=1&cctld=com)\n[Search history](/history/optout?hl=en&fg=1)\n[Search help](https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1)\nSend feedback\nDark theme: Off\nGoogle apps"
+      },
+      "raw_result": "Google   \n\n[About](https://about.google/?fg=1&utm_source=google-US&utm_medium=referral&utm_campaign=hp-header)[Store](https://store.google.com/US?utm_source=hp_header&utm_medium=google_ooo&utm_campaign=GS100042&hl=en-US)\n\n[Gmail](https://mail.google.com/mail/&ogbl)\n\n[Images](https://www.google.com/imghp?hl=en&ogbl)\n\n[](https://www.google.com/intl/en/about/products)\n\n[Sign in](https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/%3Fgl%3Dus%26uule%3Dw%2BCAIQICINVW5pdGVkIFN0YXRlcw%26hl%3Den&ec=futura_exp_og_so_72776762_e)\n\n  \n\nAI Mode\n\n*   * * *\n    \n    See more\n    \n    Delete\n    \n*   \n*   Delete\n    \n\n \n\nReport inappropriate predictions\n\n \n\n[Advertising](https://www.google.com/intl/en_us/ads/?subid=ww-ww-et-g-awa-a-g_hpafoot1_1!o2&utm_source=google.com&utm_medium=referral&utm_campaign=google_hpafooter&fg=1)[Business](https://www.google.com/services/?subid=ww-ww-et-g-awa-a-g_hpbfoot1_1!o2&utm_source=google.com&utm_medium=referral&utm_campaign=google_hpbfooter&fg=1) [How Search works](https://google.com/search/howsearchworks/?fg=1)\n\n[![](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABUAAAAYCAMAAAAiV0Z6AAAAPFBMVEVLoEN0wU6CzFKCzFKCzFKCzFKCzFJSo0MSczNDmkCCzFJPoUMTczNdr0gmgziCzFITczMTczMTczMTczPh00jOAAAAFHRSTlPF/+bIsms8Ad///hX+//5/tXw7aMEAx10AAACaSURBVHgBbc4HDoRQCATQ33tbvf9dF9QxaCT9UQaltLHOh/golXKhMs5Xqa0xU1lyoa2fXFyQOsDG38qsLy4TaV+sFislovyhPzLJJrBu6eQOtpW0LjbJkzTuTDLRVNKa3uxJI+VdiRqXSeu6GW+Qxi29eLIi8H7EsYrT42BD+mQtNO5JMjRuC4lSY8V4hsLX0egGijvUSEP9AbylEsOkeCgWAAAAAElFTkSuQmCC)Applying AI towards science and the environment](https://ai.google/societal-impact/?utm_source=googlehpfooter&utm_medium=housepromos&utm_campaign=bottom-footer)\n\n[Privacy](https://policies.google.com/privacy?hl=en&fg=1)[Terms](https://policies.google.com/terms?hl=en&fg=1)\n\nSettings\n\n[Search settings](https://www.google.com/preferences?hl=en&fg=1)\n\n[Advanced search](/advanced_search?hl=en&fg=1)\n\n[Your data in Search](/history/privacyadvisor/search/unauth?utm_source=googlemenu&fg=1&cctld=com)\n\n[Search history](/history/optout?hl=en&fg=1)\n\n[Search help](https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1)\n\nSend feedback\n\nDark theme: Off\n\nGoogle apps",
+      "status": "success",
+      "content_length": 4,
+      "timestamp": 1761467148.8972611
+    }
+  ]
+}

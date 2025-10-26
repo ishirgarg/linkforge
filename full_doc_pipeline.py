@@ -315,8 +315,8 @@ def run_full_pipeline(documentation_url: str,
         "processed_data": processed_data
     }
     
-    with open(results_file, 'w', encoding='utf-8') as f:
-        json.dump(pipeline_results, f, indent=2, ensure_ascii=False)
+    # with open(results_file, 'w', encoding='utf-8') as f:
+    #     json.dump(pipeline_results, f, indent=2, ensure_ascii=False)
     
     # Final summary
     print("\n🎉 PIPELINE COMPLETED!")
