@@ -138,7 +138,10 @@ def process_single_document(page, groq_client, vector_db, output_dir, doc_index,
         return page, False
 
 
-def run_full_pipeline(documentation_url: str, max_urls: int = 20, 
+def run_full_pipeline(documentation_url: str,
+                      crawl_result_filename: str,
+                      markdown_output_path: str,
+                      max_urls: int = 20, 
                       crawler_workers: int = 50,
                       enable_vector_db: bool = True, 
                       collection_name: str = None):
@@ -206,6 +209,7 @@ def run_full_pipeline(documentation_url: str, max_urls: int = 20,
     
     scraped_data = crawl_manual_urls(
         documentation_url=documentation_url,
+        output_filename=crawl_result_filename,
         max_urls=max_urls,
         max_workers=crawler_workers
     )
@@ -221,7 +225,7 @@ def run_full_pipeline(documentation_url: str, max_urls: int = 20,
     print("🤖 STEP 2: Converting to Markdown with Groq (CONCURRENT)...")
     print("-" * 60)
     
-    output_dir = Path("documentation_markdown")
+    output_dir = Path(markdown_output_path)
     output_dir.mkdir(exist_ok=True)
     
     processed_data = []

@@ -245,7 +245,7 @@ def scrape_single_url(url: str) -> Dict[str, Any]:
             "timestamp": time.time()
         }
 
-def crawl_manual_urls(documentation_url: str, max_urls: int = 50, max_workers: int = 5) -> List[Dict[str, Any]]:
+def crawl_manual_urls(documentation_url: str, output_filename: str, max_urls: int = 50, max_workers: int = 5) -> List[Dict[str, Any]]:
     """
     Extract URLs from documentation page and scrape each one concurrently.
     
@@ -322,10 +322,7 @@ def crawl_manual_urls(documentation_url: str, max_urls: int = 50, max_workers: i
             # Small delay to avoid overwhelming the API
             time.sleep(0.5)
     
-    # Step 3: Save results
-    timestamp = int(time.time())
-    filename = f"manual_crawl_results_{timestamp}.json"
-    
+    # Step 3: Save results    
     summary = {
         "crawl_info": {
             "documentation_url": documentation_url,
@@ -339,7 +336,7 @@ def crawl_manual_urls(documentation_url: str, max_urls: int = 50, max_workers: i
         "scraped_data": scraped_data
     }
     
-    with open(filename, 'w', encoding='utf-8') as f:
+    with open(output_filename, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ Manual crawling completed!")
@@ -348,7 +345,7 @@ def crawl_manual_urls(documentation_url: str, max_urls: int = 50, max_workers: i
     print(f"  - URLs scraped: {len(scraped_data)}")
     print(f"  - Successful: {len([r for r in scraped_data if r['status'] == 'success'])}")
     print(f"  - Failed: {len([r for r in scraped_data if r['status'] == 'error'])}")
-    print(f"💾 Results saved to: {filename}")
+    print(f"💾 Results saved to: {output_filename}")
     
     return scraped_data
 

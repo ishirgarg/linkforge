@@ -16,7 +16,7 @@ export default function App() {
 
         try {
             // call your MCP server's endpoint
-            const res = await fetch("https://unacceptable-aqua-chickadee.fastmcp.app/mcp", {
+            const res = await fetch("http://localhost:8000/mcp", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
