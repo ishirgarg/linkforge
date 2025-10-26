@@ -15,32 +15,95 @@ export default function App() {
         setResponse(null);
 
         try {
-            // Call your MCP server endpoint
+            // FastMCP with streamable-http expects SSE format
+            const savedSessionId = localStorage.getItem("mcp_session_id");
+
             const res = await fetch("/mcp", {
                 method: "POST",
                 headers: {
+                    "Accept": "application/json, text/event-stream",
                     "Content-Type": "application/json",
-                    "Accept": "application/json",
                 },
                 body: JSON.stringify({
-                    tool: "process_documentation_url",
-                    arguments: {
-                        url,
-                        max_urls: MAX_URLS,
-                        collection_name: url
+                    jsonrpc: "2.0",
+                    method: "tools/call",
+                    params: {
+                        name: "process_documentation_url",
+                        arguments: {
+                            url: url,
+                            max_urls: MAX_URLS,
+                            collection_name: url
+                        }
                     },
+                    id: Date.now()
                 }),
+                credentials: "include"
             });
 
-            if (!res.ok) {
-                throw new Error(`HTTP error: ${res.status}`);
+            const newSession = res.headers.get("x-session-id");
+            if (newSession) {
+                localStorage.setItem("mcp_session_id", newSession);
             }
 
-            const data = await res.json();
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`${res.status} ${res.statusText}: ${text}`);
+            }
+
+            // Read the streaming response
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let finalResult = null;
+
+            while (true) {
+                const { done, value } = await reader.read();
+
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+
+                // Process complete SSE messages
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const jsonStr = line.slice(6); // Remove 'data: ' prefix
+                            const parsed = JSON.parse(jsonStr);
+
+                            // Look for the result in the JSON-RPC response
+                            if (parsed.result) {
+                                finalResult = parsed.result;
+                            }
+                        } catch (parseError) {
+                            console.warn('Failed to parse SSE data:', line);
+                        }
+                    }
+                }
+            }
+
+            // Process any remaining buffer
+            if (buffer.startsWith('data: ')) {
+                try {
+                    const jsonStr = buffer.slice(6);
+                    const parsed = JSON.parse(jsonStr);
+                    if (parsed.result) {
+                        finalResult = parsed.result;
+                    }
+                } catch (parseError) {
+                    console.warn('Failed to parse final buffer:', buffer);
+                }
+            }
+
+            if (!finalResult) {
+                throw new Error('No result received from server');
+            }
 
             setResponse({
                 domain: "localhost:8000",
-                result: data,
+                result: finalResult,
                 tools: [
                     {
                         name: "list_collections",
@@ -58,8 +121,10 @@ export default function App() {
                 ],
             });
         } catch (err) {
-            console.error(err);
-            setResponse({ error: `Failed to reach MCP server: ${err.message}` });
+            console.error('Error details:', err);
+            setResponse({
+                error: `Failed to reach MCP server: ${err.message}`
+            });
         } finally {
             setLoading(false);
         }
