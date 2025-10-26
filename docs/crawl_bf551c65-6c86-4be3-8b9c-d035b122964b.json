@@ -1,0 +1,23 @@
+{
+  "crawl_info": {
+    "documentation_url": "https://ishirgarg.github.io",
+    "total_urls_found": 1,
+    "urls_scraped": 1,
+    "successful_scrapes": 0,
+    "failed_scrapes": 1,
+    "crawled_at": "2025-10-26 01:14:02"
+  },
+  "all_urls_found": [
+    "https://ishirgarg.github.io/${p.href}"
+  ],
+  "scraped_data": [
+    {
+      "url": "https://ishirgarg.github.io/${p.href}",
+      "content": "",
+      "raw_result": null,
+      "status": "error",
+      "error": "Bad Request (400): {\"error\":\"Request validation failed\",\"error_code\":\"validation\",\"details\":[{\"message\":\"\\\"url\\\" must be a valid uri\",\"path\":[\"url\"],\"type\":\"string.uri\",\"context\":{\"label\":\"url\",\"value\":\"https://ishirgarg.github.io/${p.href}\",\"key\":\"url\"}}]}",
+      "timestamp": 1761466441.581341
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "pipeline_info": {
+    "documentation_url": "http://ishirgarg.github.io",
+    "max_urls": 2,
+    "processed_at": "2025-10-26 01:10:11",
+    "total_pages": 1,
+    "successful_pages": 0,
+    "failed_pages": 1,
+    "vector_db_enabled": false,
+    "collection_name": null
+  },
+  "processed_data": [
+    {
+      "url": "http://ishirgarg.github.io/${p.href}",
+      "content": "",
+      "raw_result": null,
+      "status": "error",
+      "error": "Bad Request (400): {\"error\":\"Request validation failed\",\"error_code\":\"validation\",\"details\":[{\"message\":\"\\\"url\\\" must be a valid uri\",\"path\":[\"url\"],\"type\":\"string.uri\",\"context\":{\"label\":\"url\",\"value\":\"http://ishirgarg.github.io/${p.href}\",\"key\":\"url\"}}]}",
+      "timestamp": 1761466211.3727858,
+      "markdown_content": null,
+      "markdown_file": null
+    }
+  ]
+}

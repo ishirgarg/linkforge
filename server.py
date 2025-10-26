@@ -114,7 +114,7 @@ def get_vector_db(collection_name: str) -> ChromaVectorDB:
         raise RuntimeError("ChromaDB client is not initialized")
     
     return ChromaVectorDB(
-        client=chroma_client,
+        path="./chroma_db",
         collection_name=collection_name,
         chunk_size=500,
         chunk_overlap=50
@@ -134,8 +134,8 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
         # Run the pipeline
         run_full_pipeline(
             documentation_url=url,
-            crawl_result_filename=f"crawl_{job_id}.json",
-            markdown_output_path=f"docs_{job_id}/",
+            crawl_result_filename=f"docs/crawl_{job_id}.json",
+            markdown_output_path=f"docs/docs_{job_id}/",
             max_urls=max_urls,
             crawler_workers=crawler_workers,
             enable_vector_db=True,
@@ -262,7 +262,7 @@ async def query_documentation(
     try:
         # Use the shared ChromaDB client to create the vector DB object for this collection
         vector_db = ChromaVectorDB(
-            client=chroma_client,
+            path="./chroma_db",
             collection_name=collection_name,
             chunk_size=500,
             chunk_overlap=50
