@@ -7,7 +7,7 @@ export default function App() {
     const [jobStatus, setJobStatus] = useState(null);
     const [error, setError] = useState(null);
 
-    const MAX_URLS = 2;
+    const MAX_URLS = 4;
 
     // Poll job status every second
     useEffect(() => {
@@ -182,6 +182,9 @@ export default function App() {
                                     </p>
                                     <p className="text-sm text-gray-600 mt-2">
                                         Collection ready to query: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.collection_name}</span>
+                                    </p>
+                                    <p className="text-sm text-gray-600 mt-2">
+                                        MCP Server for your Agent: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.mcp_server_url}</span>
                                     </p>
                                 </div>
                             )}

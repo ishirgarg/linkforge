@@ -147,7 +147,8 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
             "status": "completed",
             "progress": 100,
             "message": "Documentation processing completed successfully!",
-            "completed_at": time.time()
+            "completed_at": time.time(),
+            "mcp_server_url": "http://localhost:8001/mcp"
         })
 
         # Ensure the collection exists and is ready for queries
@@ -222,7 +223,8 @@ async def get_job_status_endpoint(job_id: str):
         "collection_name": job['collection_name'],
         "progress": job['progress'],
         "message": job['message'],
-        "started_at": job['started_at']
+        "started_at": job['started_at'],
+        "mcp_server_url": job['mcp_server_url']
     }
 
     if job['status'] == 'completed':
@@ -282,7 +284,7 @@ async def process_documentation_url(url: str, collection_name: str, max_urls: in
 async def query_documentation(
     query: str, 
     collection_name: str, 
-    max_results: int = 5, 
+    max_results: int = 10, 
     enhance_with_claude: bool = True
 ) -> str:
     """Search the embedded documentation using semantic search with optional Claude enhancement."""
