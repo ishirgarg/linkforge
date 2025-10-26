@@ -92,8 +92,16 @@ def process_single_document(page, groq_client, vector_db, output_dir, doc_index,
         # Combine chunks
         markdown_content = combine_chunks(processed_chunks)
         
-        # Save markdown file
-        url_safe = url.replace('https://', '').replace('http://', '').replace('/', '_')
+        # Save markdown file with safe filename
+        # Remove protocol and sanitize URL for filename
+        url_safe = url.replace('https://', '').replace('http://', '')
+        # Remove or replace invalid Windows filename characters
+        url_safe = url_safe.replace('/', '_').replace('?', '_').replace('#', '_').replace(':', '_')
+        # Remove multiple consecutive underscores
+        while '__' in url_safe:
+            url_safe = url_safe.replace('__', '_')
+        # Trim trailing underscores
+        url_safe = url_safe.rstrip('_')
         filename = f"{doc_index:03d}_{url_safe}.md"
         filepath = output_dir / filename
         

@@ -24,7 +24,7 @@ def search_documentation(query: str, collection_name: str = "documentation", n_r
     try:
         # Initialize vector DB
         db = ChromaVectorDB(
-            path="./chroma_db",
+            path="./chroma_db20",
             collection_name=collection_name,
             chunk_size=500,
             chunk_overlap=50
@@ -101,7 +101,7 @@ def list_collections():
         print(f"❌ Error: {str(e)}")
 
 
-def interactive_search(collection_name: str = "documentation"):
+def interactive_search(collection_name: str = "docs_docs_streamlit_io"):
     """Interactive search mode."""
     print("🔍 Interactive Documentation Search")
     print("=" * 60)
@@ -196,13 +196,13 @@ def main():
         return
     
     if sys.argv[1] == '--interactive':
-        collection_name = sys.argv[2] if len(sys.argv) > 2 else "documentation"
+        collection_name = sys.argv[2] if len(sys.argv) > 2 else "docs_docs_streamlit_io"
         interactive_search(collection_name)
         return
     
     # Regular search
     query = sys.argv[1]
-    collection_name = sys.argv[2] if len(sys.argv) > 2 else "documentation"
+    collection_name = sys.argv[2] if len(sys.argv) > 2 else "docs_docs_streamlit_io"
     n_results = int(sys.argv[3]) if len(sys.argv) > 3 else 5
     
     search_documentation(query, collection_name, n_results)
