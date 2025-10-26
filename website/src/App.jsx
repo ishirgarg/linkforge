@@ -82,7 +82,7 @@ export default function App() {
                         disabled={loading}
                         className="bg-indigo-600 text-white py-3 rounded-xl hover:bg-indigo-700 transition-all"
                     >
-                        {loading ? "Processing..." : "Send to MCP Server"}
+                        {loading ? "Processing..." : "Parse my Documentation!"}
                     </button>
                 </form>
 
