@@ -20,6 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # FastMCP imports
 from fastmcp import FastMCP
 
+# FastAPI imports for REST endpoints
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+
 # Import your existing modules
 from full_doc_pipeline import run_full_pipeline
 from vector_db import ChromaVectorDB
@@ -52,6 +58,18 @@ WORKFLOW:
 PROCESSING TIME: 30-120 seconds depending on number of pages."""
 )
 
+# Create separate FastAPI app for REST endpoints
+rest_app = FastAPI(title="LinkForge REST API")
+
+# Add CORS middleware
+rest_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Global state
 processing_jobs: Dict[str, Dict[str, Any]] = {}
 executor = ThreadPoolExecutor(max_workers=3)
@@ -81,6 +99,15 @@ except ImportError:
     CLAUDE_AVAILABLE = False
     logger.warning("⚠️ anthropic package not installed. Install with: pip install anthropic")
 
+
+# Pydantic models for REST endpoints
+class ProcessDocRequest(BaseModel):
+    url: str
+    max_urls: int = 20
+    crawler_workers: int = 50
+    collection_name: str = None
+
+
 def get_vector_db(collection_name: str) -> ChromaVectorDB:
     """Retrieve a ChromaVectorDB object for a given collection using the shared client."""
     if not chroma_client:
@@ -107,6 +134,8 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
         # Run the pipeline
         run_full_pipeline(
             documentation_url=url,
+            crawl_result_filename=f"crawl_{job_id}.json",
+            markdown_output_path=f"docs_{job_id}/",
             max_urls=max_urls,
             crawler_workers=crawler_workers,
             enable_vector_db=True,
@@ -133,6 +162,55 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
             "message": f"Processing failed: {str(e)}"
         })
 
+
+# ============================================================================
+# REST API ENDPOINTS
+# ============================================================================
+
+@rest_app.post("/api/process")
+async def process_documentation_endpoint(request: ProcessDocRequest):
+    """Simple HTTP endpoint to process documentation."""
+    job_id = str(uuid.uuid4())
+    
+    collection_name = request.collection_name
+    if not collection_name:
+        parsed = urlparse(request.url)
+        domain = parsed.netloc.replace('www.', '').replace('.', '_')
+        collection_name = f"docs_{domain}"
+
+    # Initialize job status
+    processing_jobs[job_id] = {
+        "status": "processing",
+        "url": request.url,
+        "collection_name": collection_name,
+        "max_urls": request.max_urls,
+        "crawler_workers": request.crawler_workers,
+        "started_at": time.time(),
+        "progress": 0,
+        "message": "Processing started...",
+    }
+
+    # Start processing in background
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        executor,
+        _run_pipeline_background,
+        job_id, request.url, request.max_urls, request.crawler_workers, collection_name
+    )
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "url": request.url,
+        "collection_name": collection_name,
+        "max_urls": request.max_urls,
+        "message": "Documentation processing started"
+    }
+
+
+# ============================================================================
+# MCP TOOL ENDPOINTS (Original)
+# ============================================================================
 
 @mcp.tool()
 async def process_documentation_url(url: str, collection_name: str, max_urls: int = 20, crawler_workers: int = 50) -> str:
@@ -259,7 +337,6 @@ Please provide a well-structured response with code examples where appropriate."
         return f"Error querying documentation: {str(e)}"
 
 
-
 @mcp.tool()
 async def get_processing_status(job_id: str) -> str:
     """STEP 2: Get the status of a documentation processing job."""
@@ -319,5 +396,18 @@ async def list_collections() -> str:
 
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting Documentation MCP Server on http://localhost:8000/mcp")
-    mcp.run(transport="streamable-http", host="localhost", port=8000)
+    import threading
+    
+    logger.info("🚀 Starting Documentation Server")
+    logger.info("   REST API: http://localhost:8000/api/process")
+    logger.info("   MCP Protocol: http://localhost:8001/mcp")
+    
+    # Run REST API in a separate thread
+    def run_rest_api():
+        uvicorn.run(rest_app, host="localhost", port=8000, log_level="info")
+    
+    rest_thread = threading.Thread(target=run_rest_api, daemon=True)
+    rest_thread.start()
+    
+    # Run MCP server on different port
+    mcp.run(transport="streamable-http", host="localhost", port=8001)
