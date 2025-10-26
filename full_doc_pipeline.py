@@ -144,7 +144,8 @@ def run_full_pipeline(documentation_url: str,
                       max_urls: int = 20, 
                       crawler_workers: int = 50,
                       enable_vector_db: bool = True, 
-                      collection_name: str = None):
+                      collection_name: str = None,
+                      progress_dict: dict = None):
     """
     Run the complete documentation pipeline.
     
@@ -221,6 +222,11 @@ def run_full_pipeline(documentation_url: str,
     print(f"✅ Crawled {len(scraped_data)} pages")
     print()
     
+    if progress_dict is not None:
+        progress_dict.update({
+            "progress": int(50),
+        })
+
     # Step 2: Process with Groq to create markdown (CONCURRENT)
     print("🤖 STEP 2: Converting to Markdown with Groq (CONCURRENT)...")
     print("-" * 60)
@@ -265,6 +271,11 @@ def run_full_pipeline(documentation_url: str,
                 else:
                     failed += 1
                     print(f"❌ Document {doc_index} failed")
+
+                if progress_dict is not None:
+                    progress_dict.update({
+                        "progress": int(50 + 50 * (successful + failed) / len(scraped_data)),
+                    })
             except Exception as e:
                 print(f"❌ Document {doc_index} exception: {str(e)}")
                 failed += 1
@@ -343,6 +354,8 @@ def run_full_pipeline(documentation_url: str,
     print(f"\n📖 Your documentation is ready in the '{output_dir}' folder!")
     if enable_vector_db:
         print(f"🔎 Use search_docs.py to query the documentation!")
+
+    return len(processed_data), vector_db.collection.count()
 
 
 def main():

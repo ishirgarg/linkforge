@@ -181,8 +181,15 @@ export default function App() {
                                         Documentation successfully processed and indexed!
                                     </p>
                                     <p className="text-sm text-gray-600 mt-2">
+                                        Number of pages crawled: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.pages_parsed}</span>
+                                    </p>
+                                    <p className="text-sm text-gray-600 mt-2">
+                                        Number of documents created: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.chunks_created}</span>
+                                    </p>
+                                    <p className="text-sm text-gray-600 mt-2">
                                         Collection ready to query: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.collection_name}</span>
                                     </p>
+
                                     <p className="text-sm text-gray-600 mt-2">
                                         MCP Server for your Agent: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{jobStatus.mcp_server_url}</span>
                                     </p>

@@ -124,34 +124,35 @@ def _run_pipeline_background(job_id: str, url: str, max_urls: int,
                              crawler_workers: int, collection_name: str):
     """Run the full documentation processing pipeline in a background thread."""
     try:
-        # Update job status
         processing_jobs[job_id].update({
             "status": "processing",
-            "progress": 10,
-            "message": "Crawling and processing documentation..."
+            "progress": 0,
+            "message": "Crawling and processing documentation...",
         })
 
-        # Run the pipeline
-        run_full_pipeline(
+        # Run your pipeline
+        pages_parsed, chunks_created = run_full_pipeline(
             documentation_url=url,
             crawl_result_filename=f"docs/crawl_{job_id}.json",
             markdown_output_path=f"docs/docs_{job_id}/",
             max_urls=max_urls,
             crawler_workers=crawler_workers,
             enable_vector_db=True,
-            collection_name=collection_name
+            collection_name=collection_name,
+            progress_dict=processing_jobs[job_id]
         )
 
-        # Update status to completed
+        # Update status
         processing_jobs[job_id].update({
             "status": "completed",
             "progress": 100,
             "message": "Documentation processing completed successfully!",
             "completed_at": time.time(),
-            "mcp_server_url": "http://localhost:8001/mcp"
+            "mcp_server_url": "http://localhost:8001/mcp",
+            "pages_parsed": pages_parsed,
+            "chunks_created": chunks_created
         })
 
-        # Ensure the collection exists and is ready for queries
         get_vector_db(collection_name)
         logger.info(f"Vector DB ready for collection: {collection_name}")
 
@@ -210,7 +211,6 @@ async def process_documentation_endpoint(request: ProcessDocRequest):
 
 @rest_app.get("/api/status/{job_id}")
 async def get_job_status_endpoint(job_id: str):
-    """Simple HTTP endpoint to get job status."""
     if job_id not in processing_jobs:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -224,7 +224,9 @@ async def get_job_status_endpoint(job_id: str):
         "progress": job['progress'],
         "message": job['message'],
         "started_at": job['started_at'],
-        "mcp_server_url": job['mcp_server_url']
+        "mcp_server_url": job.get('mcp_server_url'),
+        "pages_parsed": job.get('pages_parsed', 0),
+        "chunks_created": job.get('chunks_created', 0)
     }
 
     if job['status'] == 'completed':
