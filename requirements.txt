@@ -23,3 +23,4 @@ groq>=0.4.0
 
 # Additional utilities
 tqdm>=4.65.0
+ollama
