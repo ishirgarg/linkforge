@@ -18,8 +18,9 @@ beautifulsoup4>=4.12.0
 lxml>=4.9.0
 brightdata-sdk>=1.0.0
 
-# Groq API
+# AI APIs
 groq>=0.4.0
+anthropic>=0.39.0
 
 # Additional utilities
 tqdm>=4.65.0
