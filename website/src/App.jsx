@@ -44,19 +44,39 @@ export default function App() {
         setJobStatus(null);
 
         try {
+<<<<<<< Updated upstream
             // Parse URL to create valid collection name
             const parsedUrl = new URL(url);
             const collectionName = `docs_${parsedUrl.hostname.replace(/\./g, '_')}${parsedUrl.pathname.replace(/[^a-zA-Z0-9]/g, '_')}`.replace(/_+$/, '');
 
             const res = await fetch("http://localhost:8000/api/process", {
+=======
+            // Call your MCP server endpoint using MCP JSON-RPC format
+            // Using standard http transport (not streamable-http) for simplicity
+            const res = await fetch("/mcp", {
+>>>>>>> Stashed changes
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
+<<<<<<< Updated upstream
                     url: url,
                     max_urls: MAX_URLS,
                     collection_name: collectionName
+=======
+                    jsonrpc: "2.0",
+                    method: "tools/call",
+                    params: {
+                        name: "process_documentation_url",
+                        arguments: {
+                            url,
+                            max_urls: MAX_URLS,
+                            collection_name: url
+                        }
+                    },
+                    id: 1
+>>>>>>> Stashed changes
                 }),
             });
 
@@ -67,8 +87,39 @@ export default function App() {
 
             const data = await res.json();
 
+<<<<<<< Updated upstream
             // Start polling
             setJobId(data.job_id);
+=======
+            // Handle MCP JSON-RPC response
+            const result = data.result || data;
+            const error = data.error;
+
+            if (error) {
+                setResponse({ error: error.message || error.code || "An error occurred" });
+                return;
+            }
+
+            setResponse({
+                domain: "localhost:8000",
+                result: result,
+                tools: [
+                    {
+                        name: "list_collections",
+                        description:
+                            "List all documentation collections available in the MCP server database.",
+                        example: "List all available documentation collections.",
+                    },
+                    {
+                        name: "query_documentation",
+                        description:
+                            "Query documentation collections to find relevant information.",
+                        example:
+                            "Search the API documentation for how to authenticate requests.",
+                    },
+                ],
+            });
+>>>>>>> Stashed changes
         } catch (err) {
             console.error('Error details:', err);
             setError(err.message || 'Unknown error occurred');
